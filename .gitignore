@@ -1,0 +1,10 @@
+node_modules/
+.env
+*.log
+sample_videos/
+DHARSHINI*/
+NAVYAA*/
+landmarks.json
+*.zip
+docx_text.txt
+test_sequential.cjs

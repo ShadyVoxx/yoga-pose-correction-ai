@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YogaAlign — Live Step-by-Step Coach</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="index.css" />
+  <style>
+    /* Additions for live video UI */
+    .video-container {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      aspect-ratio: 16/9;
+      margin-bottom: var(--space-lg);
+      border: 1px solid var(--border-subtle);
+    }
+    .video-container video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1); /* mirror */
+    }
+    .step-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(167, 139, 250, 0.3);
+      border-radius: var(--radius-lg);
+      padding: var(--space-xl);
+      text-align: center;
+      margin-bottom: var(--space-lg);
+    }
+    .step-number {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1rem;
+      color: var(--color-medium);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 8px;
+    }
+    .step-instruction {
+      font-family: 'Outfit', sans-serif;
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #fff;
+      line-height: 1.3;
+      margin-bottom: var(--space-md);
+    }
+    .ai-feedback {
+      background: rgba(255, 255, 255, 0.05);
+      padding: 16px;
+      border-radius: var(--radius-md);
+      font-size: 1.1rem;
+      color: var(--text-secondary);
+      border-left: 3px solid var(--color-medium);
+    }
+    .ai-feedback.success {
+      border-left-color: var(--color-success);
+      color: var(--color-success);
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
+    .btn-start {
+      background: var(--gradient-primary);
+      color: #fff;
+      padding: 14px 24px;
+      border: none;
+      border-radius: var(--radius-md);
+      font-weight: 600;
+      font-size: 1.1rem;
+      cursor: pointer;
+    }
+    .btn-stop {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      padding: 14px 24px;
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: rgba(0,0,0,0.6);
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      z-index: 10;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--color-low);
+    }
+    .status-dot.recording {
+      background: var(--color-high);
+      animation: pulse 1.5s infinite;
+    }
+    .status-dot.analyzing {
+      background: var(--color-medium);
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.7); }
+      70% { box-shadow: 0 0 0 6px rgba(248, 113, 113, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(248, 113, 113, 0); }
+    }
+  </style>
+</head>
+<body>
+  <div class="ambient-bg" aria-hidden="true">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <h1 class="logo-text">YogaAlign Live</h1>
+        <p class="logo-subtitle">Real-Time Step-by-Step Coach</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="input-section" id="setup-section">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Choose Your Practice</h3>
+        </div>
+        <div class="select-wrapper">
+          <select id="pose-select">
+            <option value="" disabled selected>Loading poses…</option>
+          </select>
+        </div>
+        <div class="controls" style="margin-top: 24px;">
+          <button class="btn-start" id="btn-start">Start Live Coaching</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="live-section" hidden>
+      <div class="video-container">
+        <video id="webcam-video" autoplay playsinline muted></video>
+        <div class="status-indicator">
+          <div class="status-dot" id="status-dot"></div>
+          <span id="status-text">Camera Ready</span>
+        </div>
+      </div>
+
+      <div class="step-card">
+        <div class="step-number" id="step-number">Step 1</div>
+        <div class="step-instruction" id="step-instruction">Select a pose to begin</div>
+        <div class="ai-feedback" id="ai-feedback">AI feedback will appear here as you practice.</div>
+      </div>
+
+      <div class="controls">
+        <button class="btn-stop" id="btn-stop">Stop Practice</button>
+      </div>
+    </section>
+  </main>
+
+  <canvas id="capture-canvas" hidden></canvas>
+  <script src="app.js"></script>
+</body>
+</html>
