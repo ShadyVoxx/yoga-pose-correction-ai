@@ -356,8 +356,8 @@ document.addEventListener('DOMContentLoaded', () => {
           violationStartTime = Date.now();
         } else {
           const elapsed = Date.now() - violationStartTime;
-          if (elapsed > 5000) {
-            // BEEN IN VIOLATION FOR 5+ SECONDS -> TRIGGER LOCAL LLM (Ollama)
+          if (elapsed > 3000) {
+            // BEEN IN VIOLATION FOR 3+ SECONDS -> TRIGGER LOCAL LLM (Ollama)
             triggerOllamaFallback();
           }
         }
