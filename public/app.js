@@ -201,6 +201,9 @@ document.addEventListener('DOMContentLoaded', () => {
     predictionWindow = [];
     violationStartTime = null;
     feedbackHoldUntil = 0;
+    lastShownFeedback = '';
+    pendingFeedback = '';
+    pendingFeedbackCount = 0;
     // Give the user a moment to get into position for the new step before
     // we start giving corrective feedback.
     settleUntil = Date.now() + SETTLE_GRACE_MS;
@@ -227,9 +230,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // live camera is noisy (jitter, brief misclassifications), so we require a
   // majority of the recent frames to match the expected step before
   // advancing, instead of a single high-confidence frame.
-  const WINDOW_SIZE = 6;          // ~3s of polling at 500ms
-  const REQUIRED_MATCHES = 2;     // out of the window must match (was 3 — too strict for some steps)
-  const MATCH_CONF_THRESHOLD = 0.25; // per-frame confidence to count as a "match" (was 0.35)
+  const WINDOW_SIZE = 3;          // ~1.5s of polling at 500ms
+  const REQUIRED_MATCHES = 2;     // 2 out of 3 frames must match — quick but not a fluke
+  const MATCH_CONF_THRESHOLD = 0.30; // confident enough without being too strict
   let predictionWindow = [];
 
   // Keep a recent Ollama coaching tip on screen for a bit instead of letting
@@ -237,12 +240,20 @@ document.addEventListener('DOMContentLoaded', () => {
   let feedbackHoldUntil = 0;
   const FEEDBACK_HOLD_MS = 4000;
 
+  // Deduplicate feedback — only update the DOM when the text actually changes,
+  // and only after it has appeared in 2 consecutive frames (1s debounce).
+  // This prevents the feedback box from flickering every 500ms.
+  let lastShownFeedback = '';
+  let pendingFeedback = '';
+  let pendingFeedbackCount = 0;
+  const FEEDBACK_DEBOUNCE_FRAMES = 2;
+
   // Grace period after (a) a person first appears/reappears in frame, or
   // (b) a new step begins. During this window we show a neutral "get into
   // position" message instead of corrective feedback, and don't feed these
   // transitional frames into the prediction window or violation timer — so
   // walking back to recentre yourself doesn't immediately trigger feedback.
-  const SETTLE_GRACE_MS = 1500;
+  const SETTLE_GRACE_MS = 800;
   let settleUntil = 0;
 
   async function mainLoop(now) {
@@ -325,6 +336,9 @@ document.addEventListener('DOMContentLoaded', () => {
         predictionWindow = [];
         violationStartTime = null;
         feedbackHoldUntil = 0;
+        lastShownFeedback = '';
+        pendingFeedback = '';
+        pendingFeedbackCount = 0;
         els.aiFeedback.className = 'ai-feedback success';
         els.aiFeedback.textContent = '✅ Looking good — hold the position!';
 
@@ -342,16 +356,29 @@ document.addEventListener('DOMContentLoaded', () => {
           violationStartTime = Date.now();
         } else {
           const elapsed = Date.now() - violationStartTime;
-          if (elapsed > 3000) {
-            // BEEN IN VIOLATION FOR 3+ SECONDS -> TRIGGER LOCAL LLM (Ollama)
+          if (elapsed > 5000) {
+            // BEEN IN VIOLATION FOR 5+ SECONDS -> TRIGGER LOCAL LLM (Ollama)
             triggerOllamaFallback();
           }
         }
 
-        // Don't stomp on a recently-shown Ollama coaching tip
+        // Don't stomp on a recently-shown Ollama coaching tip.
+        // Also debounce rule-based feedback — only update the DOM if the
+        // text has been stable for FEEDBACK_DEBOUNCE_FRAMES consecutive
+        // frames, preventing the box from flickering every 500ms.
         if (Date.now() >= feedbackHoldUntil) {
-          els.aiFeedback.className = 'ai-feedback';
-          els.aiFeedback.textContent = '⚠️ ' + feedback;
+          const newText = '⚠️ ' + feedback;
+          if (newText === pendingFeedback) {
+            pendingFeedbackCount++;
+          } else {
+            pendingFeedback = newText;
+            pendingFeedbackCount = 1;
+          }
+          if (pendingFeedbackCount >= FEEDBACK_DEBOUNCE_FRAMES && newText !== lastShownFeedback) {
+            els.aiFeedback.className = 'ai-feedback';
+            els.aiFeedback.textContent = newText;
+            lastShownFeedback = newText;
+          }
         }
       }
     } catch (e) {
