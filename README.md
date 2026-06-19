@@ -1,35 +1,36 @@
 # 🧘 YogaAlign — AI Pose Correction Coach
 
-An AI-powered yoga pose correction application that analyzes your practice videos and provides personalized coaching instructions using Google Gemini's multimodal capabilities.
+An AI-powered yoga pose correction application that watches your practice in real time via a local TensorFlow.js model and provides personalized coaching instructions using a local LLM (Ollama) — no cloud AI dependency.
 
 ## Features
 
 - **13 Yoga Poses** from the Common Yoga Protocol (Standing, Sitting, Prone, Supine)
-- **Video Upload** — Drag & drop or click to browse (WebM, MP4, MOV, AVI, MKV)
-- **AI-Powered Analysis** — Google Gemini 2.5 Flash analyzes joint angles, alignment, weight distribution, and more
+- **Real-Time Step Verification** — a local TensorFlow.js model classifies each pose step from MediaPipe landmarks, frame by frame
+- **Local LLM Coaching** — when stuck on a step for 3+ seconds, a local Ollama model gives rich, specific coaching tips (fully offline, no API key needed)
 - **Prioritized Corrections** — High/Medium/Low priority coaching cues with body-part specificity
 - **Safety Warnings** — Automatic detection of potential injury risks
 - **Premium UI** — Dark mode with glassmorphism, gradients, and smooth micro-animations
 
 ## Quick Start
 
-### 1. Get a Gemini API Key
+### 1. Install Ollama (local LLM)
 
-Visit [Google AI Studio](https://aistudio.google.com/apikey) and create a free API key.
+Install [Ollama](https://ollama.com), start the server, and pull a model:
+
+```bash
+ollama serve
+ollama pull llama3.2
+```
 
 ### 2. Configure Environment
 
-Copy the example environment file and add your key:
+Copy the example environment file (defaults already point at the local Ollama server):
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and replace `your_gemini_api_key_here` with your actual API key:
-
-```
-GEMINI_API_KEY=AIzaSy...your-key-here
-```
+You can change `OLLAMA_MODEL` in `.env` to any model you've pulled.
 
 ### 3. Install Dependencies
 
@@ -57,7 +58,8 @@ The app will be available at **http://localhost:3000**
 | Layer | Technology |
 |-------|-----------|
 | Backend | Node.js + Express |
-| AI Model | Google Gemini 2.5 Flash (multimodal) |
+| Step Verification Model | TensorFlow.js (local MLP, trained on MediaPipe landmarks) |
+| Rich Coaching | Local LLM via Ollama |
 | Frontend | Vanilla HTML/CSS/JS |
 | File Upload | Multer |
 | Design | Dark mode, glassmorphism, Inter + Outfit fonts |
@@ -74,10 +76,12 @@ The app will be available at **http://localhost:3000**
 ## Project Structure
 
 ```
-├── server.js          # Express backend + Gemini API integration
+├── server.js          # Express backend + local TF.js model + Ollama integration
 ├── package.json       # Dependencies
-├── .env               # API key (not committed)
+├── .env               # Local config (Ollama host/model, port)
 ├── .env.example       # Environment template
+├── train_model.js      # Trains tfjs_model/ from training_data.json
+├── prepare_dataset.py  # Builds training_data.json from recorded sessions
 └── public/
     ├── index.html     # Main page
     ├── index.css      # Design system

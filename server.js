@@ -1,29 +1,370 @@
 import 'dotenv/config';
 import express from 'express';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import tf from '@tensorflow/tfjs-node';
+import fs from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { computeJointAngles, JOINT_ANGLE_FEATURE_SIZE, computePostureDescriptors, POSTURE_DESCRIPTOR_NAMES } from './pose_features.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /* ───────────────────────────── Config ───────────────────────────── */
 
 const PORT = process.env.PORT || 3000;
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const MODEL_DIR = join(__dirname, 'tfjs_model');
+const LABELS_FILE = join(__dirname, 'labels.json');
+const MODEL_CONFIG_FILE = join(__dirname, 'model_config.json');
+const STEP_REFERENCE_STATS_FILE = join(__dirname, 'step_reference_stats.json');
 
-if (!GEMINI_KEY) {
-  console.error('\n❌  GEMINI_API_KEY is not set.');
-  process.exit(1);
+// Local LLM via Ollama — used as a fallback for rich text feedback when the
+// user has been stuck on a step for a few seconds. No external/cloud LLM
+// dependency: everything runs against a local Ollama server.
+const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+// Vision-capable local model (runs fully offline, no API key) used when the
+// frontend sends an actual camera frame — gives Gemini-Vision-style feedback
+// based on what the model actually sees, not just landmark coordinates.
+// Pull one with e.g. `ollama pull llava` or `ollama pull moondream`
+// (moondream is much smaller/faster — better for near-real-time feedback).
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || 'llava';
+
+// --------------------------------------------------------------------------
+// IMU feature toggle — must stay in sync with train_model.js / train_sandbox.js.
+//
+// Every training sample (and every live frame) can carry a 6-value IMU
+// feature vector ([ax, ay, az, gx, gy, gz]). The extraction/alignment logic
+// is fully implemented, but IMU_ENABLED is kept `false` until there's enough
+// sensor data for the model to learn a reliable signal from it. While
+// disabled, the IMU slots are zero-filled (weight = 0) for every frame, both
+// here and during training.
+//
+// To enable later: flip this flag here AND in train_model.js, then retrain.
+// --------------------------------------------------------------------------
+let IMU_ENABLED = false;
+let LANDMARK_FEATURE_SIZE = 99; // 33 landmarks * (x, y, z)
+let ANGLE_FEATURE_SIZE = JOINT_ANGLE_FEATURE_SIZE; // 12 derived joint-angle features
+let IMU_FEATURE_SIZE = 6;       // [ax, ay, az, gx, gy, gz]
+let TOTAL_FEATURE_SIZE = LANDMARK_FEATURE_SIZE + ANGLE_FEATURE_SIZE + IMU_FEATURE_SIZE;
+
+// --------------------------------------------------------------------------
+// Landmark normalization — MUST match prepare_dataset_v2.py's
+// normalize_landmarks() exactly, since the model is trained on normalized
+// landmarks. Translates so the hip midpoint (landmarks 23, 24) is the
+// origin, then scales by the shoulder-to-hip (torso) distance so the
+// features are invariant to camera distance/position.
+// --------------------------------------------------------------------------
+const LEFT_HIP = 23, RIGHT_HIP = 24, LEFT_SHOULDER = 11, RIGHT_SHOULDER = 12;
+
+function normalizeLandmarks(flat99) {
+  const pts = [];
+  for (let i = 0; i < 33; i++) {
+    pts.push([flat99[i * 3], flat99[i * 3 + 1], flat99[i * 3 + 2]]);
+  }
+
+  const hipMid = [
+    (pts[LEFT_HIP][0] + pts[RIGHT_HIP][0]) / 2,
+    (pts[LEFT_HIP][1] + pts[RIGHT_HIP][1]) / 2,
+    (pts[LEFT_HIP][2] + pts[RIGHT_HIP][2]) / 2,
+  ];
+  const shoulderMid = [
+    (pts[LEFT_SHOULDER][0] + pts[RIGHT_SHOULDER][0]) / 2,
+    (pts[LEFT_SHOULDER][1] + pts[RIGHT_SHOULDER][1]) / 2,
+    (pts[LEFT_SHOULDER][2] + pts[RIGHT_SHOULDER][2]) / 2,
+  ];
+
+  let scale = Math.sqrt(
+    (shoulderMid[0] - hipMid[0]) ** 2 +
+    (shoulderMid[1] - hipMid[1]) ** 2 +
+    (shoulderMid[2] - hipMid[2]) ** 2
+  );
+  if (scale < 1e-6) scale = 1;
+
+  const out = new Array(99);
+  for (let i = 0; i < 33; i++) {
+    out[i * 3] = (pts[i][0] - hipMid[0]) / scale;
+    out[i * 3 + 1] = (pts[i][1] - hipMid[1]) / scale;
+    out[i * 3 + 2] = (pts[i][2] - hipMid[2]) / scale;
+  }
+  return out;
 }
 
-const genAI = new GoogleGenerativeAI(GEMINI_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+let model = null;
+let labels = [];
+let isUsingMockModel = false;
+
+async function loadModel() {
+  if (fs.existsSync(LABELS_FILE) && fs.existsSync(join(MODEL_DIR, 'model.json'))) {
+    try {
+      model = await tf.loadLayersModel(`file://${MODEL_DIR}/model.json`);
+      labels = JSON.parse(fs.readFileSync(LABELS_FILE, 'utf8'));
+
+      if (fs.existsSync(MODEL_CONFIG_FILE)) {
+        const cfg = JSON.parse(fs.readFileSync(MODEL_CONFIG_FILE, 'utf8'));
+        IMU_ENABLED = !!cfg.imuEnabled;
+        LANDMARK_FEATURE_SIZE = cfg.landmarkFeatureSize ?? LANDMARK_FEATURE_SIZE;
+        ANGLE_FEATURE_SIZE = cfg.angleFeatureSize ?? ANGLE_FEATURE_SIZE;
+        IMU_FEATURE_SIZE = cfg.imuFeatureSize ?? IMU_FEATURE_SIZE;
+        TOTAL_FEATURE_SIZE = cfg.totalFeatureSize ?? (LANDMARK_FEATURE_SIZE + ANGLE_FEATURE_SIZE + IMU_FEATURE_SIZE);
+        console.log(`   Model config: ${TOTAL_FEATURE_SIZE}-feature input (IMU ${IMU_ENABLED ? 'ENABLED' : 'zero-filled'}), trained ${cfg.trainedAt || 'unknown'}, val_acc ${cfg.valAccuracy ? (cfg.valAccuracy * 100).toFixed(1) + '%' : 'unknown'}`);
+      }
+
+      console.log(`\n🧠 Local ML Model loaded successfully! (${labels.length} classes supported)`);
+    } catch (e) {
+      console.error('⚠️ Could not load ML model. Falling back to Mock.', e.message);
+      isUsingMockModel = true;
+    }
+  } else {
+    console.log('\n⚠️ No local ML model found. Falling back to Mock for demonstration.');
+    isUsingMockModel = true;
+  }
+}
+loadModel();
+
+// --------------------------------------------------------------------------
+// Posture reference stats — per-step mean/std of the "posture descriptor"
+// vector (12 joint angles + 6 distance-based descriptors, see
+// pose_features.mjs / compute_step_reference_stats.mjs), computed offline
+// from training_data.json. Used to generate specific corrective feedback
+// ("widen the stance between your legs") by comparing the live frame's
+// posture against the typical posture for the expected step.
+// --------------------------------------------------------------------------
+let stepReferenceStats = {};
+if (fs.existsSync(STEP_REFERENCE_STATS_FILE)) {
+  try {
+    stepReferenceStats = JSON.parse(fs.readFileSync(STEP_REFERENCE_STATS_FILE, 'utf8'));
+    console.log(`📐 Loaded posture reference stats for ${Object.keys(stepReferenceStats).length} steps.`);
+  } catch (e) {
+    console.error('⚠️ Could not load step_reference_stats.json:', e.message);
+  }
+}
+
+// A frame is considered "off" on a given descriptor if it's at least this
+// many (floored) standard deviations away from the reference mean for the
+// expected step. Raised from an earlier, stricter value because different
+// body proportions (leg length, torso length, shoulder width, etc.) shift
+// these angles for everyone, and the feedback shouldn't nag about that.
+const FEEDBACK_Z_THRESHOLD = 1.6;
+// At most this many corrective phrases are surfaced per frame, so feedback
+// stays focused on the single biggest thing to fix at a time.
+const MAX_CORRECTIONS = 1;
+
+// Reference std values from training data can be small relative to how much
+// a given descriptor naturally varies across different bodies. Flooring the
+// std (effectively a tolerance band) avoids nagging someone whose body just
+// makes a joint angle look a little different at rest. Hip and shoulder
+// angles in particular depend heavily on individual limb/torso proportions,
+// so they get a wider tolerance than more mechanically-constrained joints
+// like elbows/knees.
+const DESCRIPTOR_STD_FLOOR = {
+  leftElbowAngle: 0.40, rightElbowAngle: 0.40,
+  leftKneeAngle: 0.40, rightKneeAngle: 0.40,
+  leftHipAngle: 0.35, rightHipAngle: 0.35,
+  leftShoulderAngle: 0.45, rightShoulderAngle: 0.45,
+  leftAnkleAngle: 0.35, rightAnkleAngle: 0.35,
+  spineTiltAngle: 0.18, shoulderLineTiltAngle: 0.18,
+  footSeparation: 0.05, kneeSeparation: 0.05,
+  leftWristHeight: 0.15, rightWristHeight: 0.15,
+  leftWristShoulderDist: 0.15, rightWristShoulderDist: 0.15,
+};
+function descriptorStdFloor(name) {
+  return DESCRIPTOR_STD_FLOOR[name] ?? (name.toLowerCase().includes('angle') ? 0.2 : 0.05);
+}
+
+// Natural-language corrective phrases for each posture descriptor, keyed by
+// whether the live value is *below* ("low") or *above* ("high") the
+// reference mean for the expected step.
+const DESCRIPTOR_FEEDBACK = {
+  leftElbowAngle: {
+    low: "Straighten your left arm a bit more.",
+    high: "Soften your left elbow slightly — it's straighter than it needs to be.",
+  },
+  rightElbowAngle: {
+    low: "Straighten your right arm a bit more.",
+    high: "Soften your right elbow slightly — it's straighter than it needs to be.",
+  },
+  leftKneeAngle: {
+    low: "Straighten your left leg a bit more.",
+    high: "Bend your left knee slightly.",
+  },
+  rightKneeAngle: {
+    low: "Straighten your right leg a bit more.",
+    high: "Bend your right knee slightly.",
+  },
+  leftHipAngle: {
+    low: "Open up through your left hip — step your left leg back a little.",
+    high: "Bring your left leg in slightly, closer to your body.",
+  },
+  rightHipAngle: {
+    low: "Open up through your right hip — step your right leg back a little.",
+    high: "Bring your right leg in slightly, closer to your body.",
+  },
+  leftShoulderAngle: {
+    low: "Raise your left arm higher.",
+    high: "Lower your left arm a little.",
+  },
+  rightShoulderAngle: {
+    low: "Raise your right arm higher.",
+    high: "Lower your right arm a little.",
+  },
+  leftAnkleAngle: {
+    low: "Press down more evenly through your left foot.",
+    high: "Relax your left ankle slightly.",
+  },
+  rightAnkleAngle: {
+    low: "Press down more evenly through your right foot.",
+    high: "Relax your right ankle slightly.",
+  },
+  spineTiltAngle: {
+    low: "Stand up taller — lengthen through your spine.",
+    high: "You're leaning too far — bring your torso more upright.",
+  },
+  shoulderLineTiltAngle: {
+    low: "Level out your shoulders.",
+    high: "Level out your shoulders.",
+  },
+  footSeparation: {
+    low: "Widen the stance between your legs.",
+    high: "Bring your feet a bit closer together.",
+  },
+  kneeSeparation: {
+    low: "Widen your knees slightly.",
+    high: "Bring your knees closer together.",
+  },
+  leftWristHeight: {
+    low: "Raise your left arm higher.",
+    high: "Lower your left arm a little.",
+  },
+  rightWristHeight: {
+    low: "Raise your right arm higher.",
+    high: "Lower your right arm a little.",
+  },
+  leftWristShoulderDist: {
+    low: "Extend your left arm out further.",
+    high: "Bring your left arm in slightly, closer to your body.",
+  },
+  rightWristShoulderDist: {
+    low: "Extend your right arm out further.",
+    high: "Bring your right arm in slightly, closer to your body.",
+  },
+};
+
+// Arm-related descriptors (elbow/shoulder angles, wrist height/extension)
+// have repeatedly produced wrong "straighten/raise your arm" feedback even
+// after raising their tolerance bands several times. The most likely cause
+// is a systematic difference between how z (depth) is estimated by the
+// Python MediaPipe used to build the training-data reference stats vs. the
+// in-browser MediaPipe used live — since these angles are all computed from
+// 3D (x, y, z) vectors, that mismatch shows up as a large, persistent
+// z-score regardless of threshold tuning. Rather than keep chasing
+// thresholds, exclude all arm-related descriptors from both corrective
+// feedback AND step-completion matching for now — both still rely on
+// stance, legs, ankles, and spine/shoulder-line tilt, which don't depend as
+// heavily on depth.
+const SKIP_DESCRIPTORS = new Set([
+  'leftElbowAngle', 'rightElbowAngle',
+  'leftShoulderAngle', 'rightShoulderAngle',
+  'leftWristHeight', 'rightWristHeight',
+  'leftWristShoulderDist', 'rightWristShoulderDist',
+]);
+
+/**
+ * Compare the live posture descriptors directly against the reference
+ * median/MAD for the EXPECTED step (independent of the 74-class
+ * classifier), and return the fraction of non-arm descriptors that fall
+ * within FEEDBACK_Z_THRESHOLD of "typical" for that step — e.g. for
+ * "Stand 2 feet apart", this directly checks foot separation, knee
+ * separation, knee/hip/ankle angles, and spine/shoulder-line tilt against
+ * what that stance actually looks like in the training data.
+ *
+ * Returns null if there's no reference data for this step.
+ */
+function computeDescriptorMatchScore(liveDescriptors, refEntry) {
+  if (!refEntry || !refEntry.descriptors) return null;
+
+  let total = 0;
+  let withinTolerance = 0;
+  for (let i = 0; i < POSTURE_DESCRIPTOR_NAMES.length; i++) {
+    const name = POSTURE_DESCRIPTOR_NAMES[i];
+    if (SKIP_DESCRIPTORS.has(name)) continue;
+    const ref = refEntry.descriptors[name];
+    if (!ref) continue;
+
+    total++;
+    const spread = Math.max(ref.mad, descriptorStdFloor(name));
+    const z = (liveDescriptors[i] - ref.median) / spread;
+    if (Math.abs(z) < FEEDBACK_Z_THRESHOLD) withinTolerance++;
+  }
+
+  return total > 0 ? withinTolerance / total : null;
+}
+
+// Fraction of non-arm posture descriptors that must be "within tolerance" of
+// the expected step's reference stats to count the step as physically
+// matched — independent of the 74-class classifier's vote.
+const DESCRIPTOR_MATCH_THRESHOLD = 0.7;
+
+// NOTE: An earlier version of this file added a hard "arm gate" here (wrist
+// height vs. the expected step's reference) to stop steps from completing
+// without the arms moving. It was removed: checking the reference stats
+// across multiple poses showed the per-step wrist-height medians don't
+// consistently line up with the step text's described arm motion (e.g. for
+// both Tadasana and Vrkasana, the step whose text says "raise the arms" has
+// a LOWER reference wrist-height than the step before/after it that says
+// "bring the arms down"). The "_StepN" labels in the training data appear to
+// be segmented on a different boundary than the POSES[].steps[] text below,
+// so gating on their arm-height stats does the opposite of what the step
+// text asks for. Until the dataset's step segmentation is reconciled with
+// this step text, step completion relies on the stance/leg/spine descriptors
+// below only — arm position isn't separately verified.
+
+/**
+ * Compare the live posture descriptors to the reference median/MAD for the
+ * expected step, and return up to MAX_CORRECTIONS natural-language
+ * corrective phrases for the descriptors that deviate the most.
+ *
+ * Median/MAD (rather than mean/std) is used because the training data
+ * combines many participants and has real outlier frames — median/MAD
+ * describes the "typical" posture for a step without being skewed by those
+ * outliers, which makes the live comparison much more stable.
+ *
+ * Returns [] if there's no reference data or nothing is significantly off.
+ */
+function generateCorrectiveFeedback(liveDescriptors, refEntry) {
+  if (!refEntry || !refEntry.descriptors) return [];
+
+  const deviations = [];
+  for (let i = 0; i < POSTURE_DESCRIPTOR_NAMES.length; i++) {
+    const name = POSTURE_DESCRIPTOR_NAMES[i];
+    if (SKIP_DESCRIPTORS.has(name)) continue;
+    const ref = refEntry.descriptors[name];
+    if (!ref) continue;
+
+    const spread = Math.max(ref.mad, descriptorStdFloor(name));
+    const z = (liveDescriptors[i] - ref.median) / spread;
+    if (Math.abs(z) >= FEEDBACK_Z_THRESHOLD) {
+      deviations.push({ name, z });
+    }
+  }
+
+  deviations.sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
+
+  const phrases = [];
+  for (const dev of deviations) {
+    const fb = DESCRIPTOR_FEEDBACK[dev.name];
+    if (!fb) continue;
+    const phrase = dev.z < 0 ? fb.low : fb.high;
+    if (!phrases.includes(phrase)) phrases.push(phrase);
+    if (phrases.length >= MAX_CORRECTIONS) break;
+  }
+
+  return phrases;
+}
 
 /* ──────────────────────────── Poses ─────────────────────────────── */
 
 const POSES = [
   {
-    category: 'Standing', id: 'ST-01', name: 'Tadasana (Mountain Pose)',
+    category: 'Standing', id: 'STA-01', name: 'Tadasana (Mountain Pose)',
     steps: [
       "Stand 2 feet apart.",
       "Inhale, lift your arm to shoulder level in front.",
@@ -34,7 +375,7 @@ const POSES = [
     ]
   },
   {
-    category: 'Standing', id: 'ST-02', name: 'Vrkasana (Tree Pose)',
+    category: 'Standing', id: 'STA-02', name: 'Vrkasana (Tree Pose)',
     steps: [
       "Stand with feet 2 inches apart.",
       "Focus on a point in front. Exhale, hold and bend the right leg then place the foot on the inner side of the left thigh.",
@@ -44,7 +385,7 @@ const POSES = [
     ]
   },
   {
-    category: 'Standing', id: 'ST-03', name: 'Pada-hastasana (Hand-to-Foot Pose)',
+    category: 'Standing', id: 'STA-03', name: 'Pada-hastasana (Hand-to-Foot Pose)',
     steps: [
       "Stand straight with feet 2 inches apart.",
       "Inhale slowly and raise the arms up.",
@@ -55,7 +396,7 @@ const POSES = [
     ]
   },
   {
-    category: 'Standing', id: 'ST-04-I', name: 'Ardha Cakrasana (Half-Wheel Pose)',
+    category: 'Standing', id: 'STA-04-I', name: 'Ardha Cakrasana (Half-Wheel Pose)',
     steps: [
       "Stand straight with feet 2 inches apart.",
       "Support the back at the sides of the waist with the fingers. Try to keep the elbows parallel.",
@@ -66,7 +407,17 @@ const POSES = [
     ]
   },
   {
-    category: 'Standing', id: 'ST-05-I', name: 'Trikonasana (Triangle Pose)',
+    category: 'Standing', id: 'STA-04-II', name: 'Ardha Katichakrasana (Half Waist-Wheel Pose)',
+    steps: [
+      "Stand straight with feet together, arms resting beside the body.",
+      "Inhale, raise the right arm sideways and overhead, palm facing left, biceps near the ear.",
+      "Exhale, bend the trunk, neck and head to the left, sliding the left hand down the left leg towards the knee.",
+      "Hold the stretch along the right side of the body with normal breathing.",
+      "Inhale, slowly come back up to standing and lower the right arm."
+    ]
+  },
+  {
+    category: 'Standing', id: 'STA-05-I', name: 'Trikonasana (Triangle Pose)',
     steps: [
       "Stand with your feet 3 feet apart.",
       "Inhale slowly raise both the arms sideways upto shoulder level.",
@@ -76,19 +427,98 @@ const POSES = [
       "Turn your head and gaze at the tip of the left middle finger.",
       "Inhale, slowly come up."
     ]
+  },
+  {
+    category: 'Standing', id: 'STA-05-II', name: 'Parivritta Trikonasana (Revolved Triangle Pose)',
+    steps: [
+      "Stand with feet about 3 feet apart, turn the left foot slightly in and the right foot 90 degrees out.",
+      "Inhale, raise both arms sideways to shoulder level.",
+      "Exhale, twist the trunk to the right and bring the left hand down towards the floor outside the right foot.",
+      "Extend the right arm straight up in line with the left arm.",
+      "Turn the head and gaze towards the right hand's fingertips.",
+      "Inhale, come back up to standing and lower the arms."
+    ]
+  },
+  {
+    category: 'Sitting', id: 'SIA-01', name: 'Ardha Ustrasana (Half Camel Pose)',
+    steps: [
+      "Kneel on the floor with knees hip-width apart and toes pointed back.",
+      "Place both hands on the lower back or hips for support, fingers pointing downward.",
+      "Inhale, lift the chest and gently arch the spine backward, pushing the hips forward.",
+      "Let the head drop back gently, keeping the neck relaxed.",
+      "Hold the position with steady, normal breathing.",
+      "Exhale, slowly bring the trunk back upright to the starting position."
+    ]
+  },
+  {
+    category: 'Sitting', id: 'SIA-02', name: 'Vakrasana (Twisted Pose)',
+    steps: [
+      "Sit with legs stretched straight in front, spine erect.",
+      "Bend the right knee and place the right foot flat on the floor outside the left knee.",
+      "Place the right hand on the floor behind the back and bring the left arm across to grip the right knee or shin.",
+      "Inhale and lengthen the spine.",
+      "Exhale and twist the trunk, waist, shoulders and neck to the right, looking over the right shoulder.",
+      "Inhale, release the twist and return to the starting position."
+    ]
+  },
+  {
+    category: 'Prone', id: 'PR-01', name: 'Makarasana (Crocodile Pose)',
+    steps: [
+      "Lie flat on the stomach with legs straight and slightly apart.",
+      "Fold the arms and rest the forehead or chin on the forearms.",
+      "Let the feet relax and turn outward.",
+      "Close the eyes and relax the entire body, especially the lower back.",
+      "Breathe slowly and deeply, letting the abdomen expand into the floor with each inhalation."
+    ]
+  },
+  {
+    category: 'Prone', id: 'PR-02', name: 'Bhujangasana (Cobra Pose)',
+    steps: [
+      "Lie flat on the stomach, legs together, tops of the feet on the floor.",
+      "Place the palms on the floor under the shoulders, elbows close to the body.",
+      "Inhale and slowly raise the head, neck and chest off the floor, straightening the arms.",
+      "Keep the navel close to the floor, shoulders away from the ears, gazing forward or slightly upward.",
+      "Hold the position with steady breathing.",
+      "Exhale and slowly lower the chest, neck and head back down to the floor."
+    ]
+  },
+  {
+    category: 'Supine', id: 'SU-01', name: 'Ardha Halasana (Half Plough Pose)',
+    steps: [
+      "Lie flat on the back with arms beside the body, palms facing down.",
+      "Keep the legs straight and together, feet flexed.",
+      "Inhale and slowly raise both legs together towards a 90-degree angle without bending the knees.",
+      "Keep the lower back pressed toward the floor and breathe normally while holding.",
+      "Exhale and slowly lower the legs back down to the floor with control."
+    ]
+  },
+  {
+    category: 'Supine', id: 'SU-02', name: 'Savasana (Corpse Pose)',
+    steps: [
+      "Lie flat on the back with legs comfortably apart and arms relaxed beside the body, palms facing up.",
+      "Close the eyes and let the head rest naturally, neck relaxed.",
+      "Consciously relax each part of the body, from the toes up to the head.",
+      "Breathe slowly and naturally, letting the body become completely still.",
+      "Remain in this position, fully relaxed, for the desired duration."
+    ]
   }
 ];
 
 /* ──────────────────────── System Prompt ─────────────────────────── */
 
 function buildStepVerificationPrompt(poseName, currentStepText) {
-  return `You are an expert yoga instructor and certified biomechanics analyst. A student is practicing "${poseName}" in a live video feed.
+  return `You are an expert yoga instructor and certified biomechanics analyst. A student is practicing "${poseName}".
 
 They are currently attempting this specific step in the sequence:
 STEP TO VERIFY: "${currentStepText}"
 
 YOUR TASK:
-Look at the provided image frame. Analyze if the user has successfully achieved the physical position described in the "STEP TO VERIFY".
+You will be provided with a JSON array of 33 MediaPipe pose landmarks (x, y, z normalized coordinates). 
+Analyze these skeletal points to determine if the user has successfully achieved the physical position described in the "STEP TO VERIFY".
+
+For your reference, here are the key MediaPipe indices:
+0: Nose  |  11,12: L,R Shoulders  |  13,14: L,R Elbows  |  15,16: L,R Wrists
+23,24: L,R Hips      |  25,26: L,R Knees       |  27,28: L,R Ankles
 
 OUTPUT FORMAT:
 Return a JSON object with this exact structure (no markdown fences, ONLY raw JSON):
@@ -98,10 +528,33 @@ Return a JSON object with this exact structure (no markdown fences, ONLY raw JSO
 }
 
 RULES:
-- Be reasonably generous. If they are in the rough position, mark stepComplete: true so they can move to the next step.
-- The feedback must describe what you ACTUALLY SEE in the image relative to the required step.
+- Be reasonably generous. If the spatial relationships roughly match the pose requirement, mark stepComplete: true.
+- The feedback must describe what you ACTUALLY SEE in the coordinates relative to the required step.
 - Keep the feedback extremely concise, maximum 2 sentences.
 - Return ONLY the JSON object, no surrounding text.`;
+}
+
+// Vision-model prompt: the model is given the actual camera frame, so it can
+// reason about the visible body position directly (camera angle, what's in
+// frame, etc.) the way Gemini Vision did — instead of only raw coordinates.
+function buildVisionPrompt(poseName, currentStepText) {
+  return `You are an expert yoga instructor watching a student practice "${poseName}" through their webcam.
+
+They are currently attempting this step:
+STEP TO VERIFY: "${currentStepText}"
+
+Look at the image and decide whether the student has achieved the position described above.
+
+Return ONLY a raw JSON object (no markdown fences, no extra text) with this exact structure:
+{
+  "stepComplete": true or false,
+  "feedback": "If stepComplete is false, 1-2 short, specific, encouraging sentences telling them exactly what body part to adjust and how. If true, a short encouraging remark."
+}
+
+RULES:
+- Be reasonably generous — if the pose roughly matches the step, mark stepComplete: true.
+- Base feedback on what you can actually see in the image.
+- Maximum 2 sentences. Return ONLY the JSON object.`;
 }
 
 /* ────────────────────────── Express App ─────────────────────────── */
@@ -116,10 +569,10 @@ app.get('/api/poses', (_req, res) => {
 
 app.post('/api/analyze-frame', async (req, res) => {
   try {
-    const { poseName, currentStepIndex, imageBase64 } = req.body;
+    const { poseName, currentStepIndex, landmarks } = req.body;
 
-    if (!poseName || currentStepIndex === undefined || !imageBase64) {
-      return res.status(400).json({ error: 'Missing required fields: poseName, currentStepIndex, imageBase64' });
+    if (!poseName || currentStepIndex === undefined || !landmarks) {
+      return res.status(400).json({ error: 'Missing required fields: poseName, currentStepIndex, landmarks' });
     }
 
     const pose = POSES.find(p => p.name === poseName);
@@ -132,58 +585,255 @@ app.post('/api/analyze-frame', async (req, res) => {
       return res.status(400).json({ error: 'Invalid step index' });
     }
 
-    const systemPrompt = buildStepVerificationPrompt(poseName, stepText);
+    if (isUsingMockModel) {
+      // MOCK LOGIC for demonstration
+      // Pre-baked response to show the hybrid flow
+      const stepComplete = false; // Force a violation to trigger the 3s timer demonstration
+      const confidence = 0.65;
 
-    const promptData = [
-      { text: systemPrompt },
-      {
-        inlineData: {
-          mimeType: 'image/jpeg',
-          data: imageBase64.replace(/^data:image\/\w+;base64,/, ''),
-        },
-      },
-    ];
-
-    let result;
-    let retries = 3;
-    for (let i = 0; i < retries; i++) {
-      try {
-        result = await model.generateContent(promptData);
-        break;
-      } catch (error) {
-        const isRateLimit = error.message?.includes('503') || error.message?.includes('quota') || error.message?.includes('429');
-        if (isRateLimit && i < retries - 1) {
-          const delay = Math.pow(2, i) * 1500;
-          await new Promise(resolve => setTimeout(resolve, delay));
-        } else {
-          throw error;
-        }
-      }
+      const analysis = {
+        stepComplete,
+        hasViolation: true,
+        feedback: "Keep adjusting. (MOCK ML: Shoulders too low)",
+        confidence: "65.0%"
+      };
+      return res.json({ success: true, analysis, stepText });
     }
 
-    const responseText = result.response.text();
+    if (!model || labels.length === 0) {
+      return res.status(503).json({
+        error: 'The ML model is not trained yet. Run data_collector.js to gather data, then train_model.js.'
+      });
+    }
+
+    // Flatten landmarks exactly like we did during training
+    const features = [];
+    landmarks.forEach(lm => {
+      features.push(lm.x, lm.y, lm.z);
+    });
+
+    if (features.length !== LANDMARK_FEATURE_SIZE) {
+      return res.status(400).json({ error: `Expected 33 landmarks, got ${landmarks.length}` });
+    }
+
+    // Apply the same hip-centered, scale-invariant normalization used when
+    // building training_data.json (see prepare_dataset_v2.py), so live
+    // inference matches the distribution the model was trained on.
+    const normalizedFeatures = normalizeLandmarks(features);
+
+    // Derived joint-angle features (elbow/knee/hip/shoulder/ankle angles,
+    // spine tilt, shoulder-line tilt) — MUST be computed identically here and
+    // in preprocess_for_training.mjs (see pose_features.mjs).
+    const angleFeatures = computeJointAngles(normalizedFeatures);
+
+    // Extra posture descriptors (stance width, arm-raise height, etc.) used
+    // purely to generate human-readable corrective feedback below — these
+    // are NOT part of the model's input vector.
+    const postureDescriptors = computePostureDescriptors(normalizedFeatures);
+
+    // IMU features: real values can be supplied by the client (req.body.imuFeatures),
+    // but are zero-filled whenever IMU_ENABLED is false, so they contribute
+    // nothing to the prediction ("complete logic, weight 0").
+    const imuFeatures = (IMU_ENABLED && Array.isArray(req.body.imuFeatures) && req.body.imuFeatures.length === IMU_FEATURE_SIZE)
+      ? req.body.imuFeatures
+      : new Array(IMU_FEATURE_SIZE).fill(0);
+
+    const inputFeatures = [...normalizedFeatures, ...angleFeatures, ...imuFeatures];
+    if (inputFeatures.length !== TOTAL_FEATURE_SIZE) {
+      return res.status(500).json({ error: `Feature size mismatch: expected ${TOTAL_FEATURE_SIZE}, got ${inputFeatures.length}` });
+    }
+
+    // Fast local inference
+    const inputTensor = tf.tensor2d([inputFeatures]);
+    const prediction = model.predict(inputTensor);
+    const scores = await prediction.data();
+
+    // Cleanup tensors to prevent memory leak
+    inputTensor.dispose();
+    prediction.dispose();
+
+    // The user has already told us which pose they're doing — there's no
+    // need to ask the model to (re-)identify the pose itself across all 74
+    // classes. Instead, restrict the comparison to just the step-labels that
+    // belong to THIS pose (e.g. "Tadasana (Mountain Pose)_Step0" .. "_Step5")
+    // and check which of those steps the model thinks the user is closest
+    // to. This avoids the model's prediction wandering off into completely
+    // unrelated poses, which is what caused the earlier oscillation.
+    const poseLabelPrefix = `${poseName}_Step`;
+    const poseStepIndices = [];
+    labels.forEach((label, idx) => {
+      if (label.startsWith(poseLabelPrefix)) poseStepIndices.push(idx);
+    });
+
+    if (poseStepIndices.length === 0) {
+      return res.status(400).json({ error: `No trained steps found for pose "${poseName}"` });
+    }
+
+    // Best-matching step among THIS pose's steps only, plus a confidence
+    // renormalized over just those steps (so e.g. for a 6-step pose, a
+    // uniform/uncertain guess is ~17% rather than ~1.3% across all 74).
+    let bestIdx = poseStepIndices[0];
+    let poseScoreSum = 0;
+    for (const idx of poseStepIndices) {
+      poseScoreSum += scores[idx];
+      if (scores[idx] > scores[bestIdx]) bestIdx = idx;
+    }
+    const bestLabel = labels[bestIdx];
+    const bestStepNum = bestLabel.slice(poseLabelPrefix.length);
+
+    // The expected label format (e.g. "Tadasana (Mountain Pose)_Step0")
+    const expectedLabel = `${poseName}_Step${currentStepIndex}`;
+    const expectedIdx = labels.indexOf(expectedLabel);
+    const expectedScore = expectedIdx >= 0 ? scores[expectedIdx] : 0;
+
+    // Per-frame signal only. A single noisy frame from a live camera can
+    // easily mis-fire (jitter, brief occlusion, etc.), so the frontend
+    // smooths this over a short rolling window of frames before deciding
+    // stepComplete — see WINDOW_SIZE/REQUIRED_MATCHES in app.js.
+    //
+    // Some step pairs within the same pose (most commonly a pose's starting
+    // posture vs. a later step that returns to roughly the same stance, e.g.
+    // Tadasana's "stand with feet apart" Step0 vs "raise heels" Step3) look
+    // very similar to the model, so its top pick can be split close to 50/50
+    // between them. Treat the expected step as a match if it's the top pick
+    // OR is close behind it, rather than requiring it to win outright.
+    const bestScore = scores[bestIdx];
+    const classifierIsMatch = bestLabel === expectedLabel
+      || (expectedIdx >= 0 && bestScore > 0 && expectedScore >= bestScore * 0.85);
+
+    // Independent of the 74-class classifier (which has repeatedly proven
+    // too unreliable on its own to advance past step 1 live), directly check
+    // the live posture descriptors — foot separation, knee separation, knee/
+    // hip/ankle angles, spine & shoulder-line tilt — against what the
+    // EXPECTED step actually looks like in the training data. If most of
+    // those line up, treat the step as physically matched even if the
+    // classifier's top pick disagrees.
+    const descriptorMatchScore = computeDescriptorMatchScore(postureDescriptors, stepReferenceStats[expectedLabel]);
+    const descriptorIsMatch = descriptorMatchScore !== null
+      && descriptorMatchScore >= DESCRIPTOR_MATCH_THRESHOLD;
+
+    const isMatch = classifierIsMatch || descriptorIsMatch;
+
+    // Surface whichever signal is more confident so the frontend's
+    // temporal-smoothing threshold (MATCH_CONF_THRESHOLD) sees the stronger
+    // of the two.
+    const matchConfidence = Math.max(
+      poseScoreSum > 0 ? expectedScore / poseScoreSum : 0,
+      descriptorMatchScore ?? 0
+    );
+
+    // Build specific, body-part-level corrective feedback ("widen the stance
+    // between your legs", "raise your arms higher") by comparing the live
+    // posture descriptors against the typical posture for the expected step
+    // (computed offline from training data — see step_reference_stats.json).
+    // Falls back to the step-classification message if no reference stats
+    // are available or nothing stands out as significantly off.
+    let feedbackText;
+    if (isMatch) {
+      feedbackText = "Looking good — hold the position! ✅";
+    } else {
+      const correctivePhrases = generateCorrectiveFeedback(postureDescriptors, stepReferenceStats[expectedLabel]);
+      feedbackText = correctivePhrases.length > 0
+        ? correctivePhrases.join(' ')
+        : `Keep adjusting — this currently looks more like step ${bestStepNum} of this pose.`;
+    }
+
+    const analysis = {
+      stepComplete: false, // final decision made client-side via temporal smoothing
+      hasViolation: true,
+      isMatch,
+      matchConfidence,
+      feedback: feedbackText,
+      confidence: (matchConfidence * 100).toFixed(1) + '%'
+    };
+
+    res.json({ success: true, analysis, stepText });
+  } catch (error) {
+    console.error('❌ Inference error:', error.message);
+    res.status(500).json({ error: error.message || 'An error occurred during local inference.' });
+  }
+});
+
+/* ──────────────── Ollama Fallback (Rich Text Coaching) ──────────────── */
+// Called by the frontend ONLY when the user has been in violation for 3+ seconds.
+// Uses a local Ollama server (no external/cloud LLM dependency).
+
+app.post('/api/ollama-feedback', async (req, res) => {
+  try {
+    const { poseName, currentStepIndex, landmarks, imageBase64 } = req.body;
+
+    if (!poseName || currentStepIndex === undefined || !landmarks) {
+      return res.status(400).json({ error: 'Missing required fields: poseName, currentStepIndex, landmarks' });
+    }
+
+    const pose = POSES.find(p => p.name === poseName);
+    if (!pose) return res.status(400).json({ error: 'Unknown pose' });
+
+    const stepText = pose.steps[currentStepIndex];
+    if (!stepText) return res.status(400).json({ error: 'Invalid step index' });
+
+    // If the frontend sent an actual camera frame, use a vision-capable local
+    // model (e.g. llava / moondream) and let it look at the image directly —
+    // this is the closest local-only equivalent to the old Gemini Vision
+    // feedback. Otherwise fall back to the landmark-coordinates-only prompt.
+    let requestBody;
+    if (imageBase64) {
+      // Strip a data URL prefix ("data:image/jpeg;base64,...") if present —
+      // Ollama wants raw base64.
+      const rawBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
+      requestBody = {
+        model: OLLAMA_VISION_MODEL,
+        prompt: buildVisionPrompt(poseName, stepText),
+        images: [rawBase64],
+        stream: false,
+        format: 'json',
+      };
+    } else {
+      const prompt = buildStepVerificationPrompt(poseName, stepText) +
+        '\n\nHere are the 33 MediaPipe Landmarks for the current frame:\n' + JSON.stringify(landmarks);
+      requestBody = {
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false,
+        format: 'json',
+      };
+    }
+
+    let ollamaRes;
+    try {
+      ollamaRes = await fetch(`${OLLAMA_HOST}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+    } catch (e) {
+      const modelUsed = imageBase64 ? OLLAMA_VISION_MODEL : OLLAMA_MODEL;
+      return res.status(503).json({
+        error: `Could not reach local Ollama server at ${OLLAMA_HOST}. Make sure Ollama is running ` +
+          `(e.g. \`ollama serve\`) and the model "${modelUsed}" is pulled (\`ollama pull ${modelUsed}\`).`
+      });
+    }
+
+    if (!ollamaRes.ok) {
+      const errText = await ollamaRes.text();
+      return res.status(502).json({ error: `Ollama error: ${errText}` });
+    }
+
+    const ollamaJson = await ollamaRes.json();
+    const responseText = ollamaJson.response || '';
 
     let analysis;
     try {
       analysis = JSON.parse(responseText);
     } catch {
-      const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (jsonMatch) {
-        analysis = JSON.parse(jsonMatch[1].trim());
-      } else {
-        const braceMatch = responseText.match(/\{[\s\S]*\}/);
-        if (braceMatch) {
-          analysis = JSON.parse(braceMatch[0]);
-        } else {
-          throw new Error('Could not parse JSON');
-        }
-      }
+      const braceMatch = responseText.match(/\{[\s\S]*\}/);
+      analysis = braceMatch ? JSON.parse(braceMatch[0]) : { feedback: responseText };
     }
 
     res.json({ success: true, analysis, stepText });
   } catch (error) {
-    console.error('❌ Analysis error:', error.message);
-    res.status(500).json({ error: error.message || 'An error occurred during analysis.' });
+    console.error('❌ Ollama fallback error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 

@@ -1,0 +1,14 @@
+{
+  "imuEnabled": false,
+  "landmarkFeatureSize": 99,
+  "angleFeatureSize": 12,
+  "imuFeatureSize": 6,
+  "totalFeatureSize": 117,
+  "numClasses": 74,
+  "architecture": "512-256-128-64",
+  "trainedAt": "2026-06-19T20:25:51.747987Z",
+  "trainSamples": 139969,
+  "valSamples": 24701,
+  "valAccuracy": 0.890773652888547,
+  "notes": "v6: sklearn MLP 512-256-128-64, two-phase on 164670 samples (vmcy+cbly batches). val_acc=89.08%"
+}
