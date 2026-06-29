@@ -1,6 +1,22 @@
 # 🧘 YogaAlign — AI Pose Correction Coach
 
+> **Phase 2 of a two-phase ML implementation.**
+> Phase 1 established the classification foundation — MediaPipe landmark extraction feeding a LightGBM classifier across the Yoga-82 dataset, achieving **93.6% / 90.2% / 82.5%** accuracy at the 6 / 20 / 82-class hierarchy with sub-millisecond inference.
+> → [**yoga-pose-classification**](https://github.com/sruthisureshkumar-arch/yoga-pose-classification)
+>
+> This repo takes that foundation further: instead of just identifying a pose, it guides a user through each step of a pose sequence in real time, verifies body position against trained reference statistics, and generates specific corrective feedback using a local LLM — entirely offline, no cloud API.
+
+---
+
 An AI-powered yoga pose correction application that watches your practice in real time via a local TensorFlow.js model and provides personalized coaching instructions using a local LLM (Ollama) — no cloud AI dependency.
+
+## What's new in Phase 2
+
+- **Step-level classification** — the model classifies not just the pose but which step within the pose the user is at, across 74 step-level classes (4–7 steps per pose)
+- **89.1% validation accuracy** on 164,670 training samples across 13 Common Yoga Protocol poses
+- **Posture descriptor matching** — joint angles, hip/knee/ankle alignment, foot separation and spine tilt compared against per-step reference medians computed from training data
+- **Local LLM coaching** — Ollama generates specific corrective phrases when a user is stuck on a step for 3+ seconds, using landmark coordinates or a live camera frame
+- **IMU-ready feature pipeline** — 117-float input vector (99 normalised landmarks + 12 joint angles + 6 IMU slots) designed to accept wearable sensor data without code changes
 
 ## Features
 
