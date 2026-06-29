@@ -1,5 +1,5 @@
 # 🧘 YogaAlign — Real-Time Yoga Pose Correction with Local ML & LLM Coaching
-*Collaborative research project — [Sruthi Suresh Kumar](https://github.com/sruthisureshkumar-arch) & [ShadyVoxx](https://github.com/ShadyVoxx)*
+*Collaborative research project — [Sruthi Sureshkumar](https://github.com/sruthisureshkumar-arch) & [ShadyVoxx](https://github.com/ShadyVoxx)*
 
 > **Phase 2 of a two-phase ML implementation.**
 > Phase 1 established the classification foundation — MediaPipe landmark extraction feeding a LightGBM classifier across the Yoga-82 dataset, achieving **93.6% / 90.2% / 82.5%** accuracy at the 6 / 20 / 82-class hierarchy with sub-millisecond inference.
