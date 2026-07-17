@@ -23,3 +23,4 @@ train_output.txt
 
 # Old model dir
 tfjs_model_new/
+frame_log.jsonl
