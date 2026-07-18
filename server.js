@@ -5,6 +5,7 @@ import fs from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
+import dgram from 'dgram';
 import { computeJointAngles, JOINT_ANGLE_FEATURE_SIZE, computePostureDescriptors, POSTURE_DESCRIPTOR_NAMES } from './pose_features.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -136,6 +137,69 @@ function logFrame(poseName, stepIndex, isMatch, matchConfidence, feedbackText, l
     feedback: feedbackText,
     landmarks: realLandmarks,
     deviation
+  });
+
+  // ── UDP → Unreal Engine (spec: FrameID|X,Y,Z,dX,dY,dZ|... × 17 bones) ────
+  const bones17 = mapTo17Bones(landmarks);
+  const deviation17 = deviation ? mapTo17Bones(
+    deviation.map(d => ({ x: d.dx, y: d.dy, z: d.dz }))
+  ) : null;
+  sendUDP(frameID, bones17, deviation17);
+}
+// ── UDP sender (Unreal Engine spec: 10.20.15.206:5000) ───────────────────────
+// Format per spec: FrameID|X,Y,Z,dX,dY,dZ|X,Y,Z,dX,dY,dZ|... (17 bones)
+// X,Y,Z = real MediaPipe coords  |  dX,dY,dZ = deviation from ideal
+// All values rounded to 3 decimal places.
+const UE_UDP_HOST = process.env.UE_UDP_HOST || '10.20.15.206';
+const UE_UDP_PORT = parseInt(process.env.UE_UDP_PORT || '5000');
+const udpSocket = dgram.createSocket('udp4');
+
+// ── MediaPipe (33) → UE 17-bone mapping ──────────────────────────────────────
+// UE bone index → MediaPipe landmark index (or midpoint of two)
+// MediaPipe indices: 0=nose, 11=L.shoulder, 12=R.shoulder, 13=L.elbow,
+// 14=R.elbow, 15=L.wrist, 16=R.wrist, 23=L.hip, 24=R.hip,
+// 25=L.knee, 26=R.knee, 27=L.ankle, 28=R.ankle
+function midpoint(a, b) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    z: (a.z + b.z) / 2
+  };
+}
+
+function mapTo17Bones(lm) {
+  return [
+    lm[0],                          // 0  Head (nose)
+    midpoint(lm[11], lm[12]),       // 1  Spine03 Upper Chest (shoulder midpoint)
+    midpoint(lm[23], lm[24]),       // 2  Spine01 Lower Torso (hip midpoint)
+    lm[11],                         // 3  Clavicle L (left shoulder)
+    lm[12],                         // 4  Clavicle R (right shoulder)
+    midpoint(lm[11], lm[13]),       // 5  Upper L (left upper arm)
+    midpoint(lm[12], lm[14]),       // 6  Upper R (right upper arm)
+    lm[13],                         // 7  Lower L (left elbow)
+    lm[14],                         // 8  Lower R (right elbow)
+    lm[15],                         // 9  Hand L (left wrist)
+    lm[16],                         // 10 Hand R (right wrist)
+    midpoint(lm[23], lm[25]),       // 11 Thigh L (left hip→knee)
+    midpoint(lm[24], lm[26]),       // 12 Thigh R (right hip→knee)
+    lm[25],                         // 13 Calf L (left knee)
+    lm[26],                         // 14 Calf R (right knee)
+    lm[27],                         // 15 Foot L (left ankle)
+    lm[28]                          // 16 Foot R (right ankle)
+  ];
+}
+
+function sendUDP(frameID, bones17, deviation17) {
+  // Build: FrameID|X,Y,Z,dX,dY,dZ|X,Y,Z,dX,dY,dZ|...
+  const r = (v) => Math.round(v * 1000) / 1000; // 3 decimal places
+  const segments = bones17.map((bone, i) => {
+    const d = deviation17 ? deviation17[i] : { dx: 0, dy: 0, dz: 0 };
+    return `${r(bone.x)},${r(bone.y)},${r(bone.z)},${r(d.dx)},${r(d.dy)},${r(d.dz)}`;
+  });
+  const packet = `${frameID}|${segments.join('|')}`;
+  const buf = Buffer.from(packet, 'utf8');
+  udpSocket.send(buf, UE_UDP_PORT, UE_UDP_HOST, (err) => {
+    if (err) console.error('UDP send error:', err.message);
   });
 }
 // ─────────────────────────────────────────────────────────────────────────────
