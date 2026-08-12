@@ -331,10 +331,10 @@ if (fs.existsSync(STEP_REFERENCE_STATS_FILE)) {
 // expected step. Raised from an earlier, stricter value because different
 // body proportions (leg length, torso length, shoulder width, etc.) shift
 // these angles for everyone, and the feedback shouldn't nag about that.
-const FEEDBACK_Z_THRESHOLD = 1.6;
+const FEEDBACK_Z_THRESHOLD = 1.4;
 // At most this many corrective phrases are surfaced per frame, so feedback
 // stays focused on the single biggest thing to fix at a time.
-const MAX_CORRECTIONS = 1;
+const MAX_CORRECTIONS = 2;
 
 // Reference std values from training data can be small relative to how much
 // a given descriptor naturally varies across different bodies. Flooring the
@@ -942,14 +942,13 @@ app.post('/api/analyze-frame', async (req, res) => {
       descriptorMatchScore ?? 0
     );
 
-    // Build specific, body-part-level corrective feedback ("widen the stance
-    // between your legs", "raise your arms higher") by comparing the live
-    // posture descriptors against the typical posture for the expected step
-    // (computed offline from training data — see step_reference_stats.json).
-    // Falls back to the step-classification message if no reference stats
-    // are available or nothing stands out as significantly off.
+    // Only say "Looking good" when BOTH the classifier AND the posture
+    // descriptors agree — either alone is too noisy. isMatch (OR) still
+    // drives step advancement so the window logic stays unchanged.
+    const isStrongMatch = classifierIsMatch && descriptorIsMatch;
+
     let feedbackText;
-    if (isMatch) {
+    if (isStrongMatch) {
       feedbackText = "Looking good — hold the position! ✅";
     } else {
       const correctivePhrases = generateCorrectiveFeedback(postureDescriptors, stepReferenceStats[expectedLabel]);

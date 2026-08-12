@@ -1,6 +1,11 @@
 document.addEventListener('DOMContentLoaded', () => {
   const els = {
     poseSelect: document.getElementById('pose-select'),
+    loginSection: document.getElementById('login-section'),
+    btnLogin: document.getElementById('btn-login'),
+    nameInput: document.getElementById('name-input'),
+    ageInput: document.getElementById('age-input'),
+    loginGreeting: document.getElementById('login-greeting'),
     btnStart: document.getElementById('btn-start'),
     btnStop: document.getElementById('btn-stop'),
     setupSection: document.getElementById('setup-section'),
@@ -16,6 +21,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let posesData = [];
   let currentPose = null;
+  // User profile from the login screen — age drives the <40 vs 40+
+  // coaching classification and is sent with EVERY server request.
+  let userName = null;
+  let userAge = null;
   let currentStepIndex = 0;
   let stream = null;
   let isAnalyzing = false;
@@ -143,7 +152,21 @@ document.addEventListener('DOMContentLoaded', () => {
       });
     });
 
-  // 2. Start Practice
+  // 2. Login — capture name + age once, then unlock pose selection.
+  els.btnLogin.addEventListener('click', () => {
+    const ageVal = parseInt(els.ageInput.value, 10);
+    if (!Number.isFinite(ageVal) || ageVal <= 0) {
+      alert('Please enter your age to continue — it personalizes your coaching.');
+      return;
+    }
+    userAge = ageVal;
+    userName = els.nameInput.value.trim() || 'Yogi';
+    els.loginGreeting.textContent = `Signed in as ${userName}, age ${userAge} (${userAge < 40 ? 'under-40' : '40+'} coaching)`;
+    els.loginSection.hidden = true;
+    els.setupSection.hidden = false;
+  });
+
+  // 3. Start Practice
   els.btnStart.addEventListener('click', async () => {
     const selectedName = els.poseSelect.value;
     if (!selectedName) {
@@ -182,7 +205,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // 3. Stop Practice
+  // 4. Stop Practice
   els.btnStop.addEventListener('click', stopPractice);
 
   function stopPractice() {
@@ -230,9 +253,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // live camera is noisy (jitter, brief misclassifications), so we require a
   // majority of the recent frames to match the expected step before
   // advancing, instead of a single high-confidence frame.
-  const WINDOW_SIZE = 3;          // ~1.5s of polling at 500ms
-  const REQUIRED_MATCHES = 2;     // 2 out of 3 frames must match — quick but not a fluke
-  const MATCH_CONF_THRESHOLD = 0.30; // confident enough without being too strict
+  const WINDOW_SIZE = 6;           // ~3s of polling at 500ms
+  const REQUIRED_MATCHES = 5;     // 5 out of 6 frames must match — solid hold without forever wait
+  const MATCH_CONF_THRESHOLD = 0.35;
   let predictionWindow = [];
 
   // Keep a recent Ollama coaching tip on screen for a bit instead of letting
@@ -314,7 +337,9 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({
           poseName: currentPose.name,
           currentStepIndex: currentStepIndex,
-          landmarks: latestLandmarks
+          landmarks: latestLandmarks,
+          age: userAge,
+          userName
         })
       });
 
@@ -335,7 +360,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (stepComplete) {
         predictionWindow = [];
         violationStartTime = null;
-        feedbackHoldUntil = 0;
+        feedbackHoldUntil = Date.now() + 3000; // block corrective feedback during celebration
         lastShownFeedback = '';
         pendingFeedback = '';
         pendingFeedbackCount = 0;
@@ -356,8 +381,8 @@ document.addEventListener('DOMContentLoaded', () => {
           violationStartTime = Date.now();
         } else {
           const elapsed = Date.now() - violationStartTime;
-          if (elapsed > 3000) {
-            // BEEN IN VIOLATION FOR 3+ SECONDS -> TRIGGER LOCAL LLM (Ollama)
+          if (elapsed > 7000) {
+            // BEEN IN VIOLATION FOR 7+ SECONDS -> TRIGGER LOCAL LLM (Ollama)
             triggerOllamaFallback();
           }
         }
@@ -374,7 +399,7 @@ document.addEventListener('DOMContentLoaded', () => {
             pendingFeedback = newText;
             pendingFeedbackCount = 1;
           }
-          if (pendingFeedbackCount >= FEEDBACK_DEBOUNCE_FRAMES && newText !== lastShownFeedback) {
+          if (pendingFeedbackCount >= FEEDBACK_DEBOUNCE_FRAMES) {
             els.aiFeedback.className = 'ai-feedback';
             els.aiFeedback.textContent = newText;
             lastShownFeedback = newText;
@@ -426,7 +451,9 @@ document.addEventListener('DOMContentLoaded', () => {
           poseName: currentPose.name,
           currentStepIndex: currentStepIndex,
           landmarks: latestLandmarks,
-          imageBase64
+          imageBase64,
+          age: userAge,
+          userName
         })
       });
 
