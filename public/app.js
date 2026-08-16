@@ -15,9 +15,41 @@ document.addEventListener('DOMContentLoaded', () => {
     stepNumber: document.getElementById('step-number'),
     stepInstruction: document.getElementById('step-instruction'),
     aiFeedback: document.getElementById('ai-feedback'),
+    btnMute: document.getElementById('btn-mute'),
     statusDot: document.getElementById('status-dot'),
     statusText: document.getElementById('status-text')
   };
+
+  // ── Text-to-Speech ───────────────────────────────────────────────────────
+  let ttsEnabled = true;
+  let lastSpokenText = '';
+
+  function stripForSpeech(text) {
+    // Remove emoji, HTML tags, and leading symbols like ⚠️ ✅
+    return text
+      .replace(/<[^>]*>/g, '')          // strip HTML tags
+      .replace(/[^\p{L}\p{N}\s,.!?'-]/gu, '') // strip non-letter chars (emoji etc.)
+      .trim();
+  }
+
+  function speak(text) {
+    if (!ttsEnabled) return;
+    const clean = stripForSpeech(text);
+    if (!clean || clean === lastSpokenText) return;
+    lastSpokenText = clean;
+    window.speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(clean);
+    utt.rate = 1.0;
+    utt.pitch = 1.0;
+    window.speechSynthesis.speak(utt);
+  }
+
+  els.btnMute.addEventListener('click', () => {
+    ttsEnabled = !ttsEnabled;
+    els.btnMute.textContent = ttsEnabled ? '🔊' : '🔇';
+    if (!ttsEnabled) window.speechSynthesis.cancel();
+  });
+  // ─────────────────────────────────────────────────────────────────────────
 
   let posesData = [];
   let currentPose = null;
@@ -225,6 +257,7 @@ document.addEventListener('DOMContentLoaded', () => {
     violationStartTime = null;
     feedbackHoldUntil = 0;
     lastShownFeedback = '';
+    lastSpokenText = '';
     pendingFeedback = '';
     pendingFeedbackCount = 0;
     // Give the user a moment to get into position for the new step before
@@ -366,6 +399,7 @@ document.addEventListener('DOMContentLoaded', () => {
         pendingFeedbackCount = 0;
         els.aiFeedback.className = 'ai-feedback success';
         els.aiFeedback.textContent = '✅ Looking good — hold the position!';
+        speak('Looking good! Hold the position.');
 
         // Wait 2s and move to next step
         setTimeout(() => {
@@ -402,6 +436,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (pendingFeedbackCount >= FEEDBACK_DEBOUNCE_FRAMES) {
             els.aiFeedback.className = 'ai-feedback';
             els.aiFeedback.textContent = newText;
+            if (newText !== lastShownFeedback) speak(newText);
             lastShownFeedback = newText;
           }
         }
@@ -463,6 +498,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // so the next 500ms ML poll doesn't immediately overwrite it.
         els.aiFeedback.className = 'ai-feedback';
         els.aiFeedback.innerHTML = `<strong>Coach Tip:</strong> ${data.analysis.feedback}`;
+        speak(data.analysis.feedback);
         feedbackHoldUntil = Date.now() + FEEDBACK_HOLD_MS;
         lastOllamaRequestTime = Date.now();
       } else if (data.error) {
