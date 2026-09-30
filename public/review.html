@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>YogaAlign — Feedback Review</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e0d8;min-height:100vh}
+header{background:#1a1d27;border-bottom:1px solid #2a2d3a;padding:14px 24px;display:flex;align-items:center;gap:16px}
+header h1{font-size:1.1rem;font-weight:700;color:#fff}
+header span{font-size:.85rem;color:#888;background:#2a2d3a;padding:3px 10px;border-radius:20px}
+.toolbar{display:flex;gap:10px;padding:14px 24px;background:#13161f;border-bottom:1px solid #2a2d3a;flex-wrap:wrap;align-items:center}
+.filter-btn{padding:5px 14px;border-radius:20px;border:1px solid #3a3d4a;background:transparent;color:#bbb;font-size:.8rem;cursor:pointer;transition:.15s}
+.filter-btn.active{background:#4f46e5;border-color:#4f46e5;color:#fff}
+.filter-btn.llm{border-color:#BA7517;color:#BA7517}
+.filter-btn.llm.active{background:#BA7517;color:#fff}
+.filter-btn.fa{border-color:#993C1D;color:#e07050}
+.filter-btn.fa.active{background:#993C1D;color:#fff}
+.stats{margin-left:auto;font-size:.8rem;color:#888;display:flex;gap:14px}
+.stats b{color:#ddd}
+.main{display:grid;grid-template-columns:1fr 340px;height:calc(100vh - 95px)}
+.event-list{overflow-y:auto;border-right:1px solid #1e2130}
+.event-item{padding:12px 20px;border-bottom:1px solid #1a1d27;cursor:pointer;transition:.12s;display:grid;grid-template-columns:52px 1fr auto;gap:10px;align-items:start}
+.event-item:hover{background:#1a1d27}
+.event-item.selected{background:#1e2438;border-left:3px solid #4f46e5}
+.event-item.ollama{border-left:3px solid #BA7517}
+.event-item.ollama.selected{background:#241e10;border-left:3px solid #e69320}
+.frame-id{font-size:.75rem;color:#666;padding-top:2px}
+.pose-tag{font-size:.72rem;font-weight:600;color:#4f8ef7;text-transform:uppercase;letter-spacing:.04em}
+.step-badge{display:inline-block;font-size:.7rem;background:#2a2d3a;color:#aaa;padding:1px 6px;border-radius:3px;margin-left:4px}
+.feedback-text{font-size:.82rem;color:#ccc;margin-top:3px;line-height:1.4}
+.ollama-tag{display:inline-block;font-size:.68rem;background:#3a2800;color:#e69320;padding:1px 7px;border-radius:3px;margin-top:3px;font-weight:600}
+.ml-tag{display:inline-block;font-size:.68rem;background:#1e2438;color:#6a8fd8;padding:1px 7px;border-radius:3px;margin-top:3px}
+.ts{font-size:.7rem;color:#555}
+.label-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;margin-top:5px}
+.label-dot.genuine{background:#1D9E75}
+.label-dot.false_alarm{background:#993C1D}
+.label-dot.unlabeled{background:#333}
+.match-pill{font-size:.68rem;padding:1px 6px;border-radius:3px;font-weight:600}
+.match-pill.yes{background:#0a2a1e;color:#1D9E75}
+.match-pill.no{background:#2a0f08;color:#e06040}
+/* Detail panel */
+.detail{overflow-y:auto;background:#13161f;padding:0}
+.detail-empty{display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:.9rem}
+.detail-head{padding:16px 20px;background:#1a1d27;border-bottom:1px solid #2a2d3a}
+.detail-head h2{font-size:.95rem;font-weight:700;margin-bottom:4px}
+.detail-head .sub{font-size:.78rem;color:#888}
+.section{padding:14px 20px;border-bottom:1px solid #1e2130}
+.section-title{font-size:.72rem;font-weight:700;color:#888;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:4px 8px;font-size:.8rem}
+.kv dt{color:#777}
+.kv dd{color:#ddd;word-break:break-word}
+.consultant-box{background:#221a08;border:1px solid #4a3510;border-radius:6px;padding:10px 12px;font-size:.82rem;line-height:1.5;color:#e8c880;margin-top:4px}
+.consultant-box .lbl{font-size:.7rem;color:#BA7517;font-weight:700;margin-bottom:4px}
+canvas.skeleton{display:block;background:#0c0e14;border-radius:6px;width:100%;height:180px}
+.label-buttons{display:flex;gap:8px;padding:14px 20px}
+.lbtn{flex:1;padding:8px;border-radius:6px;border:1px solid #3a3d4a;background:transparent;font-size:.82rem;cursor:pointer;font-weight:600;transition:.15s}
+.lbtn.genuine{border-color:#1D9E75;color:#1D9E75}
+.lbtn.genuine:hover,.lbtn.genuine.active{background:#0a2a1e;border-color:#1D9E75}
+.lbtn.false_alarm{border-color:#993C1D;color:#e07050}
+.lbtn.false_alarm:hover,.lbtn.false_alarm.active{background:#2a0f08;border-color:#993C1D}
+.lbtn.clear{border-color:#3a3d4a;color:#888}
+.lbtn.clear:hover{background:#2a2d3a}
+.deviation-bar{display:flex;align-items:center;gap:8px;margin-top:4px}
+.deviation-bar .bar-wrap{flex:1;height:5px;background:#2a2d3a;border-radius:3px;overflow:hidden}
+.deviation-bar .bar-fill{height:100%;border-radius:3px}
+.deviation-bar .val{font-size:.72rem;color:#999;min-width:38px;text-align:right}
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 Feedback Review</h1>
+  <span id="hdr-count">Loading…</span>
+</header>
+<div class="toolbar">
+  <button class="filter-btn active" data-filter="all">All events</button>
+  <button class="filter-btn llm" data-filter="ollama">🤖 LLM-triggered only</button>
+  <button class="filter-btn" data-filter="violation">⚠️ Violations only</button>
+  <button class="filter-btn fa" data-filter="false_alarm">🚩 Flagged false alarms</button>
+  <button class="filter-btn" data-filter="unlabeled">Unlabelled</button>
+  <div class="stats">
+    <span>Genuine <b id="cnt-genuine">—</b></span>
+    <span>False alarms <b id="cnt-fa">—</b></span>
+    <span>LLM calls <b id="cnt-llm">—</b></span>
+  </div>
+</div>
+<div class="main">
+  <div class="event-list" id="event-list"><div style="padding:20px;color:#555">Loading events…</div></div>
+  <div class="detail" id="detail"><div class="detail-empty">Select an event to review</div></div>
+</div>
+
+<script>
+let allEvents = [];
+let filtered = [];
+let selectedID = null;
+let currentFilter = 'all';
+
+// BONE CONNECTIONS for 8 key joints: indices into slim landmark array
+// slim: [LS=0,RS=1,LE=2,RE=3,LW=4,RW=5,LH=6,RH=7,LK=8,RK=9,LA=10,RA=11]
+// MediaPipe indices → slim index: 11→0,12→1,13→2,14→3,15→4,16→5,23→6,24→7,25→8,26→9,27→10,28→11
+const BONES = [[0,1],[0,2],[1,3],[2,4],[3,5],[0,6],[1,7],[6,7],[6,8],[7,9],[8,10],[9,11]];
+
+async function load() {
+  const r = await fetch('/api/review-events');
+  const d = await r.json();
+  allEvents = d.events || [];
+  updateStats();
+  applyFilter();
+}
+
+function updateStats() {
+  document.getElementById('cnt-genuine').textContent  = allEvents.filter(e=>e.label==='genuine').length;
+  document.getElementById('cnt-fa').textContent       = allEvents.filter(e=>e.label==='false_alarm').length;
+  document.getElementById('cnt-llm').textContent      = allEvents.filter(e=>e.source==='ollama').length;
+  document.getElementById('hdr-count').textContent    = `${allEvents.length} events`;
+}
+
+function applyFilter() {
+  const f = currentFilter;
+  filtered = allEvents.filter(e => {
+    if (f === 'ollama')      return e.source === 'ollama';
+    if (f === 'violation')   return !e.isMatch;
+    if (f === 'false_alarm') return e.label === 'false_alarm';
+    if (f === 'unlabeled')   return !e.label;
+    return true;
+  });
+  renderList();
+}
+
+function renderList() {
+  const el = document.getElementById('event-list');
+  if (!filtered.length) { el.innerHTML = '<div style="padding:20px;color:#555">No events match this filter.</div>'; return; }
+  el.innerHTML = filtered.map(e => {
+    const isOllama = e.source === 'ollama';
+    const labelClass = e.label ?? 'unlabeled';
+    const ts = new Date(e.timestamp).toLocaleTimeString();
+    const conf = e.matchConfidence !== null ? Math.round(e.matchConfidence*100) + '%' : '—';
+    return `<div class="event-item${isOllama?' ollama':''}${e.frameID===selectedID?' selected':''}" data-id="${e.frameID}">
+      <div>
+        <div class="frame-id">#${e.frameID}</div>
+        <div class="ts">${ts}</div>
+      </div>
+      <div>
+        <div><span class="pose-tag">${e.poseName.replace(/\(.*\)/,'').trim()}</span><span class="step-badge">Step ${e.stepIndex+1}</span></div>
+        <div class="feedback-text">${e.feedback || '—'}</div>
+        <div style="margin-top:4px">
+          ${isOllama ? '<span class="ollama-tag">🤖 LLM</span>' : '<span class="ml-tag">ML</span>'}
+          <span class="match-pill ${e.isMatch?'yes':'no'}" style="margin-left:4px">${e.isMatch?'match':'no match'}</span>
+        </div>
+      </div>
+      <div><div class="label-dot ${labelClass}"></div></div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.event-item').forEach(el => {
+    el.addEventListener('click', () => selectEvent(parseInt(el.dataset.id)));
+  });
+}
+
+function selectEvent(frameID) {
+  selectedID = frameID;
+  renderList();
+  const e = allEvents.find(x => x.frameID === frameID);
+  if (!e) return;
+  renderDetail(e);
+}
+
+function renderDetail(e) {
+  const isOllama = e.source === 'ollama';
+  const ts = new Date(e.timestamp).toLocaleString();
+  const conf = e.matchConfidence !== null ? (e.matchConfidence*100).toFixed(1)+'%' : '—';
+
+  // Deviation summary
+  let devHtml = '<dd>No deviation data</dd>';
+  if (e.deviation && Object.keys(e.deviation).length) {
+    const sorted = Object.entries(e.deviation).sort((a,b)=>Math.abs(b[1])-Math.abs(a[1])).slice(0,6);
+    devHtml = '<dd style="width:100%">' + sorted.map(([k,v])=>{
+      const pct = Math.min(100, Math.abs(v)*200);
+      const col = Math.abs(v)>0.15 ? '#e06040' : Math.abs(v)>0.07 ? '#e0a040' : '#1D9E75';
+      return `<div style="margin-bottom:4px"><div style="display:flex;justify-content:space-between;font-size:.72rem;margin-bottom:2px"><span style="color:#aaa">${k}</span><span style="color:${col}">${v.toFixed(4)}</span></div><div class="deviation-bar"><div class="bar-wrap"><div class="bar-fill" style="width:${pct}%;background:${col}"></div></div></div></div>`;
+    }).join('') + '</dd>';
+  }
+
+  document.getElementById('detail').innerHTML = `
+  <div class="detail-head">
+    <h2>${e.poseName} — Step ${e.stepIndex+1}</h2>
+    <div class="sub">${ts} &nbsp;·&nbsp; Frame #${e.frameID} &nbsp;·&nbsp; ${e.userName ?? 'unknown'} (age ${e.age ?? '?'})</div>
+  </div>
+
+  <canvas class="skeleton" id="skeleton-canvas" width="600" height="180"></canvas>
+
+  <div class="section">
+    <div class="section-title">Event details</div>
+    <dl class="kv">
+      <dt>Source</dt><dd>${isOllama ? '🤖 Ollama LLM ('+e.model+')' : '🧠 ML classifier'}</dd>
+      <dt>isMatch</dt><dd>${e.isMatch ? '✅ Yes' : '❌ No'}</dd>
+      <dt>ML confidence</dt><dd>${conf}</dd>
+      <dt>Feedback</dt><dd>${e.feedback || '—'}</dd>
+      ${isOllama && e.ollamaStepComplete !== null ? `<dt>LLM stepComplete</dt><dd>${e.ollamaStepComplete ? '✅ Yes' : '❌ No'}</dd>` : ''}
+      <dt>Age group</dt><dd>${e.ageGroup ?? '—'}</dd>
+    </dl>
+  </div>
+
+  ${isOllama && e.stepText ? `
+  <div class="section">
+    <div class="section-title">📖 Consultant rubric used in LLM prompt</div>
+    <div class="consultant-box">
+      <div class="lbl">STEP TO VERIFY (yoga book instruction)</div>
+      "${e.stepText}"
+    </div>
+    <div style="font-size:.72rem;color:#666;margin-top:6px">This text from the yoga book was injected as the STEP TO VERIFY field in the Ollama prompt — the ground-truth rubric the LLM evaluated the student against.</div>
+  </div>` : ''}
+
+  <div class="section">
+    <div class="section-title">Joint deviation from ideal</div>
+    <dl class="kv">${devHtml}</dl>
+  </div>
+
+  <div class="section-title" style="padding:10px 20px 4px;font-size:.72px;color:#888;text-transform:uppercase;letter-spacing:.08em">Label this event</div>
+  <div class="label-buttons">
+    <button class="lbtn genuine${e.label==='genuine'?' active':''}" data-label="genuine">✅ Genuine correction</button>
+    <button class="lbtn false_alarm${e.label==='false_alarm'?' active':''}" data-label="false_alarm">🚩 False alarm</button>
+    <button class="lbtn clear" data-label="null">Clear</button>
+  </div>`;
+
+  // Label buttons
+  document.querySelectorAll('.lbtn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const label = btn.dataset.label === 'null' ? null : btn.dataset.label;
+      await fetch(`/api/review-events/${e.frameID}/label`, {
+        method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({label})
+      });
+      const ev = allEvents.find(x => x.frameID === e.frameID);
+      if (ev) ev.label = label;
+      updateStats();
+      renderList();
+      selectEvent(e.frameID);
+    });
+  });
+
+  // Draw skeleton
+  drawSkeleton(e.landmarks);
+}
+
+function drawSkeleton(lms) {
+  const canvas = document.getElementById('skeleton-canvas');
+  if (!canvas || !lms || lms.length < 12) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0c0e14';
+  ctx.fillRect(0, 0, W, H);
+
+  // Fit landmarks into canvas with padding
+  const xs = lms.map(l=>l.x), ys = lms.map(l=>l.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 30;
+  const scaleX = (W - pad*2) / (maxX - minX || 1);
+  const scaleY = (H - pad*2) / (maxY - minY || 1);
+  const scale  = Math.min(scaleX, scaleY);
+  const offX   = (W - (maxX - minX) * scale) / 2 - minX * scale;
+  const offY   = (H - (maxY - minY) * scale) / 2 - minY * scale;
+
+  const px = i => lms[i].x * scale + offX;
+  const py = i => lms[i].y * scale + offY;
+
+  // Bones
+  BONES.forEach(([a,b]) => {
+    if (!lms[a] || !lms[b]) return;
+    ctx.beginPath();
+    ctx.moveTo(px(a), py(a));
+    ctx.lineTo(px(b), py(b));
+    ctx.strokeStyle = '#4f46e5';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  });
+
+  // Joints
+  lms.forEach((lm, i) => {
+    ctx.beginPath();
+    ctx.arc(px(i), py(i), 5, 0, Math.PI*2);
+    ctx.fillStyle = '#e06040';
+    ctx.fill();
+  });
+}
+
+// Filter buttons
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.dataset.filter;
+    applyFilter();
+  });
+});
+
+load();
+// Auto-refresh every 5 seconds to pick up new events during live session
+setInterval(async () => {
+  const prev = allEvents.length;
+  await load();
+  if (allEvents.length !== prev && selectedID === null) renderList();
+}, 5000);
+</script>
+</body>
+</html>
