@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import dgram from 'dgram';
 import { computeJointAngles, JOINT_ANGLE_FEATURE_SIZE, computePostureDescriptors, POSTURE_DESCRIPTOR_NAMES } from './pose_features.mjs';
+import { computeEightAngles, getCorrections, getTargetAngles, diffCompareAngle, keyJointVisibility } from './yogatwin_angles.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -436,24 +437,18 @@ const DESCRIPTOR_FEEDBACK = {
   },
 };
 
-// Arm-related descriptors (elbow/shoulder angles, wrist height/extension)
-// have repeatedly produced wrong "straighten/raise your arm" feedback even
-// after raising their tolerance bands several times. The most likely cause
-// is a systematic difference between how z (depth) is estimated by the
-// Python MediaPipe used to build the training-data reference stats vs. the
-// in-browser MediaPipe used live — since these angles are all computed from
-// 3D (x, y, z) vectors, that mismatch shows up as a large, persistent
-// z-score regardless of threshold tuning. Rather than keep chasing
-// thresholds, exclude all arm-related descriptors from both corrective
-// feedback AND step-completion matching for now — both still rely on
-// stance, legs, ankles, and spine/shoulder-line tilt, which don't depend as
-// heavily on depth.
-const SKIP_DESCRIPTORS = new Set([
+// Arm descriptors are excluded from step-completion matching (depth/z
+// mismatch between Python training data and browser MediaPipe makes them
+// unreliable for advancement), but ARE used for corrective feedback so the
+// user gets arm-specific guidance during a step.
+const SKIP_FOR_MATCHING = new Set([
   'leftElbowAngle', 'rightElbowAngle',
   'leftShoulderAngle', 'rightShoulderAngle',
   'leftWristHeight', 'rightWristHeight',
   'leftWristShoulderDist', 'rightWristShoulderDist',
 ]);
+// Nothing skipped for feedback — arms included.
+const SKIP_FOR_FEEDBACK = new Set();
 
 /**
  * Compare the live posture descriptors directly against the reference
@@ -473,7 +468,7 @@ function computeDescriptorMatchScore(liveDescriptors, refEntry) {
   let withinTolerance = 0;
   for (let i = 0; i < POSTURE_DESCRIPTOR_NAMES.length; i++) {
     const name = POSTURE_DESCRIPTOR_NAMES[i];
-    if (SKIP_DESCRIPTORS.has(name)) continue;
+    if (SKIP_FOR_MATCHING.has(name)) continue;
     const ref = refEntry.descriptors[name];
     if (!ref) continue;
 
@@ -523,7 +518,7 @@ function generateCorrectiveFeedback(liveDescriptors, refEntry) {
   const deviations = [];
   for (let i = 0; i < POSTURE_DESCRIPTOR_NAMES.length; i++) {
     const name = POSTURE_DESCRIPTOR_NAMES[i];
-    if (SKIP_DESCRIPTORS.has(name)) continue;
+    if (SKIP_FOR_FEEDBACK.has(name)) continue;
     const ref = refEntry.descriptors[name];
     if (!ref) continue;
 
@@ -947,15 +942,37 @@ app.post('/api/analyze-frame', async (req, res) => {
     // drives step advancement so the window logic stays unchanged.
     const isStrongMatch = classifierIsMatch && descriptorIsMatch;
 
+    // ── YogaTwin 8-angle corrections ─────────────────────────────────────────
+    // Use raw (un-normalized) landmarks from the request to compute 8 canonical
+    // joint angles (right/left: elbow, shoulder, hip, knee) and compare them
+    // to per-pose ideal targets from YogaTwin-AI.  Only run when all 8 key
+    // joints are sufficiently visible.
+    let ytCorrections = [];
+    const targetAngles = getTargetAngles(poseName);
+    if (targetAngles && keyJointVisibility(landmarks) >= 0.35) {
+      const eightAngles = computeEightAngles(landmarks);
+      ytCorrections = getCorrections(eightAngles, targetAngles);
+    }
+
     let feedbackText;
     if (isStrongMatch) {
       feedbackText = "Looking good — hold the position! ✅";
     } else {
+      // Merge descriptor-based corrections (specific to each step via reference
+      // stats) with YogaTwin joint-angle corrections (pose-level ideal angles).
+      // Descriptor phrases are preferred; YogaTwin fills in any gaps.
       const correctivePhrases = generateCorrectiveFeedback(postureDescriptors, stepReferenceStats[expectedLabel]);
-      feedbackText = correctivePhrases.length > 0
-        ? correctivePhrases.join(' ')
+      const allCorrections = correctivePhrases.length > 0
+        ? correctivePhrases
+        : ytCorrections.slice(0, 2); // cap to 2 so feedback stays concise
+      feedbackText = allCorrections.length > 0
+        ? allCorrections.join(' ')
         : `Keep adjusting — this currently looks more like step ${bestStepNum} of this pose.`;
     }
+
+    const ytScore = targetAngles && keyJointVisibility(landmarks) >= 0.35
+      ? diffCompareAngle(computeEightAngles(landmarks), targetAngles)
+      : null;
 
     const analysis = {
       stepComplete: false, // final decision made client-side via temporal smoothing
@@ -963,7 +980,9 @@ app.post('/api/analyze-frame', async (req, res) => {
       isMatch,
       matchConfidence,
       feedback: feedbackText,
-      confidence: (matchConfidence * 100).toFixed(1) + '%'
+      confidence: (matchConfidence * 100).toFixed(1) + '%',
+      ytAngleScore: ytScore !== null ? (ytScore * 100).toFixed(1) + '%' : null,
+      ytCorrections,
     };
 
     // Log frame to frame_log.jsonl and broadcast to WebSocket clients (UE)
