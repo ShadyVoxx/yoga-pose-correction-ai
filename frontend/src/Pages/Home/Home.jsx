@@ -1,7 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 
-import annaUniversityLogo from "../../../../server/assets/1200px-Anna_University_Logo.svg.png";
+import annaUniversityLogo from "../../assets/1200px-Anna_University_Logo.svg.png";
 import homepageBackground from "../../../assets/homepage_bg.png";
 import commonYogaProtocolLogo from "../../../assets/Common_Yoga_Protocol.jpg";
 
