@@ -1,0 +1,134 @@
+.metadata-page {
+  min-height: 100vh;
+  background: #f4f7fb;
+  padding: 30px 16px;
+}
+
+.metadata-card {
+  max-width: 760px;
+  margin: 0 auto;
+  background: #ffffff;
+  border: 1px solid #dce4ef;
+  border-radius: 14px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+  padding: 24px;
+}
+
+.metadata-greeting {
+  text-align: center;
+  padding: 24px 0 16px 0;
+  border-bottom: 1px solid #e9ecef;
+  margin-bottom: 20px;
+}
+
+.greeting-text {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #1f618d;
+  margin-bottom: 6px;
+}
+
+.greeting-subtext {
+  color: #6b7280;
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.operator-info-bar {
+  font-size: 0.85rem;
+  color: #6b7280;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 12px;
+}
+
+.participant-id-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #eaf0ff;
+  color: #1f3ea8;
+  border: 1px solid #c4d3ff;
+  padding: 7px 12px;
+  border-radius: 999px;
+  margin: 8px 0;
+}
+
+.copy-btn {
+  border: 1px solid #9db3f8;
+  background: #ffffff;
+  color: #1f3ea8;
+  border-radius: 6px;
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.meta-field-full {
+  grid-column: 1 / -1;
+}
+
+.meta-label {
+  display: block;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #263247;
+  margin-bottom: 8px;
+}
+
+.optional-tag {
+  font-size: 12px;
+  color: #6b7280;
+  margin-left: 6px;
+  font-weight: 500;
+}
+
+.meta-input,
+.meta-select,
+.meta-textarea {
+  width: 100%;
+  border: 1px solid #c7d3e3;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 1rem;
+}
+
+.meta-textarea {
+  resize: vertical;
+}
+
+.field-error {
+  color: #c02020;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.meta-submit {
+  margin-top: 20px;
+  width: 100%;
+  border: none;
+  border-radius: 8px;
+  background: #1f3ea8;
+  color: #ffffff;
+  padding: 12px 14px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.meta-submit:disabled {
+  background: #95a8de;
+  cursor: not-allowed;
+}
+
+@media (max-width: 760px) {
+  .meta-grid {
+    grid-template-columns: 1fr;
+  }
+}

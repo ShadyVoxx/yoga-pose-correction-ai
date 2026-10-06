@@ -1,0 +1,931 @@
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useSession } from "../context/SessionContext";
+import {
+  startRecording,
+  stopRecording,
+  getTZero,
+} from "../utils/recorder";
+import { initMediaPipe } from "../utils/mediapipeSetup";
+import CONFIG from "../config";
+import {
+  completePoseRecording,
+  openLandmarksWebSocket,
+  startPoseRecording,
+} from "../utils/sessionRecorderApi";
+import { POSES } from "../data/poses";
+import "./SequencerPage.css";
+
+const RECORDING_DURATION_SEC = 180;
+
+function SequencerPage() {
+  const navigate = useNavigate();
+
+  const {
+    participantId,
+    cameraStream,
+    sessionRecordings,
+    setSessionRecordings,
+    tZero: sessionTZero,
+    metadata,
+    username,
+  } = useSession();
+
+  const [view, setView] = useState("select");
+  const [selectedPoseIndex, setSelectedPoseIndex] = useState(null);
+  const [recordPhase, setRecordPhase] = useState(null);
+  const [getReadyCountdown, setGetReadyCountdown] = useState(3);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [confirmRerecordIndex, setConfirmRerecordIndex] = useState(null);
+  const [categoryFilter, setCategoryFilter] = useState("All");
+  const [isFinalizing, setIsFinalizing] = useState(false);
+
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const landmarkBufferRef = useRef([]);
+  const mediaPipeCleanupRef = useRef(null);
+  const tZeroRef = useRef(null);
+  const streamRef = useRef(null);
+  const recordingStartRef = useRef(0);
+  const recordingCancelRef = useRef(null);
+  const selectedPoseIndexRef = useRef(null);
+  const wsRef = useRef(null);
+  const finalizeRecordingRef = useRef(null);
+
+  useEffect(() => {
+    if (!CONFIG.USE_OFFLINE_SESSION_RECORDER) return undefined;
+    const ws = openLandmarksWebSocket();
+    ws.onopen = () => console.log("Landmark WebSocket connected (offline recorder)");
+    ws.onerror = (e) => console.error("Landmark WebSocket error", e);
+    ws.onclose = () => console.log("Landmark WebSocket closed");
+    wsRef.current = ws;
+
+    return () => {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    selectedPoseIndexRef.current = selectedPoseIndex;
+  }, [selectedPoseIndex]);
+
+  useEffect(() => {
+    streamRef.current = cameraStream;
+
+    const v = videoRef.current;
+
+    if (v && cameraStream) {
+      v.srcObject = cameraStream;
+
+      const playAttempt = v.play();
+
+      if (playAttempt !== undefined) {
+        playAttempt.catch(() => {
+          /* autoplay policies */
+        });
+      }
+    }
+  }, [cameraStream]);
+
+  useEffect(() => {
+    if (view !== "record" || !cameraStream) return;
+
+    const v = videoRef.current;
+    if (!v) return;
+
+    v.srcObject = cameraStream;
+
+    const playAttempt = v.play();
+
+    if (playAttempt !== undefined) {
+      playAttempt.catch(() => {});
+    }
+  }, [view, recordPhase, cameraStream]);
+
+  const isPoseRecorded = useCallback(
+    (poseName) =>
+      sessionRecordings.some(
+        (r) =>
+          r.poseName === poseName &&
+          !r.skipped &&
+          (r.storedOffline === true || r.videoBlob != null)
+      ),
+    [sessionRecordings]
+  );
+
+  const recordedCount = POSES.filter((p) =>
+    isPoseRecorded(p.name)
+  ).length;
+  const categories = ["All", "Standing", "Sitting", "Supine"];
+  const visiblePoses =
+    categoryFilter === "All"
+      ? POSES
+      : POSES.filter((p) => p.category === categoryFilter);
+  const groupedVisiblePoses = visiblePoses.reduce((acc, pose, globalIndex) => {
+    const poseIndex = POSES.findIndex((p) => p.id === pose.id);
+    if (!acc[pose.category]) acc[pose.category] = [];
+    acc[pose.category].push({ pose, poseIndex, globalIndex });
+    return acc;
+  }, {});
+
+  const upsertSessionRecording = useCallback(
+    (entry) => {
+      setSessionRecordings((prev) => {
+        const filtered = prev.filter(
+          (r) => r.poseName !== entry.poseName
+        );
+
+        const next = [...filtered, entry];
+
+        next.sort(
+          (a, b) => (a.poseIndex ?? 0) - (b.poseIndex ?? 0)
+        );
+
+        return next;
+      });
+    },
+    [setSessionRecordings]
+  );
+
+  const upsertSessionRecordingRef = useRef(upsertSessionRecording);
+  const sessionMetaRef = useRef({ participantId, metadata, username });
+
+  useEffect(() => {
+    upsertSessionRecordingRef.current = upsertSessionRecording;
+  }, [upsertSessionRecording]);
+
+  useEffect(() => {
+    sessionMetaRef.current = { participantId, metadata, username };
+  }, [participantId, metadata, username]);
+
+  useEffect(() => {
+    if (recordPhase !== "recording") {
+      finalizeRecordingRef.current = null;
+    }
+  }, [recordPhase]);
+
+  const playStartCue = useCallback(() => {
+    try {
+      const AudioCtx =
+        window.AudioContext || window.webkitAudioContext;
+
+      if (!AudioCtx) return;
+
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = "sine";
+      osc.frequency.value = 1000;
+
+      gain.gain.setValueAtTime(
+        0.0001,
+        ctx.currentTime
+      );
+
+      gain.gain.exponentialRampToValueAtTime(
+        0.35,
+        ctx.currentTime + 0.03
+      );
+
+      gain.gain.exponentialRampToValueAtTime(
+        0.32,
+        ctx.currentTime + 0.28
+      );
+
+      gain.gain.exponentialRampToValueAtTime(
+        0.0001,
+        ctx.currentTime + 0.5
+      );
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+
+      osc.onended = () => {
+        void ctx.close();
+      };
+    } catch {
+      // ignore audio errors
+    }
+  }, []);
+
+  const beginRecordingFlow = useCallback((poseIndex) => {
+    setSelectedPoseIndex(poseIndex);
+    setView("record");
+    setRecordPhase("getReady");
+    setGetReadyCountdown(3);
+    setRecordingSeconds(0);
+    setIsFinalizing(false);
+    landmarkBufferRef.current = [];
+  }, []);
+
+  const handlePoseCardClick = useCallback(
+    (poseIndex) => {
+      const pose = POSES[poseIndex];
+
+      if (isPoseRecorded(pose.name)) {
+        setConfirmRerecordIndex(poseIndex);
+        return;
+      }
+
+      beginRecordingFlow(poseIndex);
+    },
+    [isPoseRecorded, beginRecordingFlow]
+  );
+
+  const confirmRerecordYes = useCallback(() => {
+    if (confirmRerecordIndex == null) return;
+
+    const idx = confirmRerecordIndex;
+
+    setConfirmRerecordIndex(null);
+
+    beginRecordingFlow(idx);
+  }, [confirmRerecordIndex, beginRecordingFlow]);
+
+  const cleanupRecordingArtifacts = useCallback(async () => {
+    recordingCancelRef.current?.();
+    recordingCancelRef.current = null;
+
+    if (mediaPipeCleanupRef.current) {
+      mediaPipeCleanupRef.current();
+      mediaPipeCleanupRef.current = null;
+    }
+
+    await stopRecording();
+  }, []);
+
+  const handleBackToList = useCallback(async () => {
+    if (recordPhase === "recording") {
+      await cleanupRecordingArtifacts();
+    }
+
+    setView("select");
+    setRecordPhase(null);
+    setSelectedPoseIndex(null);
+  }, [recordPhase, cleanupRecordingArtifacts]);
+
+  useEffect(() => {
+    if (view !== "record" || recordPhase !== "getReady")
+      return;
+
+    if (!cameraStream) return;
+
+    setGetReadyCountdown(3);
+
+    const t1 = window.setTimeout(
+      () => setGetReadyCountdown(2),
+      1000
+    );
+
+    const t2 = window.setTimeout(
+      () => setGetReadyCountdown(1),
+      2000
+    );
+
+    const t3 = window.setTimeout(() => {
+      void (async () => {
+        const poseIndex = selectedPoseIndexRef.current;
+        const pose = poseIndex != null ? POSES[poseIndex] : null;
+
+        if (CONFIG.USE_OFFLINE_SESSION_RECORDER && pose) {
+          try {
+            await startPoseRecording({
+              poseId: pose.id,
+              poseName: pose.name,
+            });
+          } catch (err) {
+            console.error("Failed to start pose recording folder:", err);
+          }
+        }
+
+        playStartCue();
+
+        setRecordPhase("recording");
+
+        await startRecording(streamRef.current, {
+          sessionTZero: sessionTZero ?? undefined,
+          videoElement: videoRef.current,
+          persistOffline: true,
+        });
+
+        recordingStartRef.current = getTZero() ?? Date.now();
+      })();
+    }, 3000);
+
+    return () => {
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+      window.clearTimeout(t3);
+    };
+  }, [
+    view,
+    recordPhase,
+    selectedPoseIndex,
+    cameraStream,
+    playStartCue,
+    sessionTZero,
+  ]);
+
+  useEffect(() => {
+    if (
+      view !== "record" ||
+      recordPhase !== "recording"
+    )
+      return;
+
+    if (!cameraStream) return;
+
+    const poseIndex = selectedPoseIndexRef.current;
+
+    if (poseIndex == null) return;
+
+    const pose = POSES[poseIndex];
+    const duration = Math.min(
+      pose.duration || RECORDING_DURATION_SEC,
+      RECORDING_DURATION_SEC
+    );
+
+    let cancelled = false;
+    let finalized = false;
+
+    landmarkBufferRef.current = [];
+
+    tZeroRef.current =
+      getTZero() ??
+      recordingStartRef.current ??
+      Date.now();
+
+    const initHandle = requestAnimationFrame(() => {
+      if (cancelled) return;
+      requestAnimationFrame(() => {
+        if (cancelled) return;
+        if (videoRef.current && canvasRef.current) {
+          try {
+            mediaPipeCleanupRef.current = initMediaPipe(
+              videoRef.current,
+              canvasRef.current,
+              (frameData) => landmarkBufferRef.current.push(frameData),
+              tZeroRef.current,
+              (rawLandmarks) => {
+                const ws = wsRef.current;
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  const ts = Date.now() / 1000;
+                  ws.send(
+                    JSON.stringify({
+                      timestamp: ts,
+                      frame_id: landmarkBufferRef.current.length,
+                      pose_id: pose.id,
+                      landmarks: rawLandmarks.map((lm) => ({
+                        x: lm.x,
+                        y: lm.y,
+                        z: lm.z ?? 0,
+                        visibility: lm.visibility ?? 0,
+                      })),
+                    })
+                  );
+                }
+              }
+            );
+          } catch {
+            /* MediaPipe CDN may be blocked */
+          }
+        }
+      });
+    });
+
+    setRecordingSeconds(0);
+
+    const start = Date.now();
+
+    const tick = window.setInterval(() => {
+      const elapsed = Math.floor(
+        (Date.now() - start) / 1000
+      );
+
+      setRecordingSeconds(
+        Math.min(elapsed, duration)
+      );
+    }, 200);
+
+    const finalizeRecording = async ({ manual = false } = {}) => {
+      if (finalized) return;
+      if (cancelled && !manual) return;
+      finalized = true;
+      cancelled = true;
+
+      window.clearInterval(tick);
+      window.clearTimeout(end);
+
+      setIsFinalizing(true);
+
+      if (mediaPipeCleanupRef.current) {
+        mediaPipeCleanupRef.current();
+        mediaPipeCleanupRef.current = null;
+      }
+
+      const poseLandmarks = [...landmarkBufferRef.current];
+
+      const actualDuration = Math.min(
+        Math.max(1, Math.floor((Date.now() - start) / 1000)),
+        duration
+      );
+
+      const { videoBlob, imuPackets, storedOffline } = await stopRecording({
+        poseId: pose.id,
+        poseName: pose.name,
+        persistOffline: true,
+      });
+
+      const { participantId: pid, metadata: meta, username: uname } =
+        sessionMetaRef.current;
+
+      if (CONFIG.USE_OFFLINE_SESSION_RECORDER) {
+        try {
+          await completePoseRecording({
+            participantId: pid,
+            poseName: pose.name,
+            poseId: pose.id,
+            sanskrit: pose.sanskrit,
+            category: pose.category,
+            variation: pose.variation || "",
+            duration: actualDuration,
+            recordedAt: new Date().toISOString(),
+            skipped: false,
+            username: uname || meta?.username || "",
+            sessionNumber: meta?.sessionNumber,
+            name: meta?.name || "",
+            age: meta?.age || "",
+            gender: meta?.gender || "",
+            height: meta?.height || "",
+            weight: meta?.weight || "",
+            experience: meta?.experience || "",
+            healthRemarks: meta?.healthRemarks || "",
+            sessionDate: meta?.sessionDate || "",
+          });
+        } catch (err) {
+          console.error("Failed to finalize pose folder:", err);
+        }
+      }
+
+      upsertSessionRecordingRef.current({
+        poseId: pose.id,
+        poseIndex,
+        poseName: pose.name,
+        sanskrit: pose.sanskrit,
+        category: pose.category,
+        variation: pose.variation || "",
+        videoBlob: storedOffline ? null : videoBlob,
+        imuPackets: storedOffline ? [] : imuPackets,
+        landmarks: storedOffline ? [] : poseLandmarks,
+        storedOffline: Boolean(storedOffline),
+        imuSource: storedOffline ? "offline_udp_json" : "BNO08x_real_udp",
+        frameCount: poseLandmarks.length,
+        recordedAt: new Date().toISOString(),
+        duration: actualDuration,
+        skipped: false,
+        sensorConfig: {
+          totalSlots: CONFIG.TOTAL_SENSOR_COUNT,
+          activeSlots: CONFIG.ACTIVE_SENSOR_COUNT,
+          activeSensorIds: CONFIG.SENSOR_SLOTS.map((s) => s.id),
+          connectedDuring: storedOffline
+            ? CONFIG.SENSOR_SLOTS.map((s) => s.id)
+            : Object.keys(imuPackets[0]?.devices || {}),
+        },
+      });
+
+      setIsFinalizing(false);
+      setRecordPhase("saved");
+    };
+
+    finalizeRecordingRef.current = finalizeRecording;
+
+    const end = window.setTimeout(() => {
+      void finalizeRecording();
+    }, duration * 1000);
+
+    recordingCancelRef.current = () => {
+      cancelled = true;
+      finalized = true;
+      window.clearInterval(tick);
+      window.clearTimeout(end);
+    };
+
+    return () => {
+      cancelAnimationFrame(initHandle);
+
+      if (mediaPipeCleanupRef.current) {
+        mediaPipeCleanupRef.current();
+        mediaPipeCleanupRef.current = null;
+      }
+
+      recordingCancelRef.current = null;
+
+      window.clearInterval(tick);
+      window.clearTimeout(end);
+    };
+  }, [view, recordPhase, cameraStream, sessionTZero]);
+
+  useEffect(() => {
+    if (recordPhase !== "saved") return;
+
+    const id = window.setTimeout(() => {
+      setView("select");
+      setRecordPhase(null);
+      setSelectedPoseIndex(null);
+    }, 1500);
+
+    return () => window.clearTimeout(id);
+  }, [recordPhase]);
+
+  const selectedPose =
+    selectedPoseIndex != null
+      ? POSES[selectedPoseIndex]
+      : null;
+
+  const durationSec = selectedPose
+    ? Math.min(selectedPose.duration || RECORDING_DURATION_SEC, RECORDING_DURATION_SEC)
+    : RECORDING_DURATION_SEC;
+
+  const remainingRecording = Math.max(
+    0,
+    durationSec - recordingSeconds
+  );
+
+  const currentPoseIndex = selectedPoseIndex;
+
+  if (!cameraStream) {
+    return (
+      <div className="sequencer-fullscreen sequencer-padding">
+        <div className="sequencer-alert sequencer-alert-danger">
+          Camera stream not available. Use Start Session
+          from the hardware setup page first.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="sequencer-fullscreen">
+      {confirmRerecordIndex != null ? (
+        <div
+          className="sequencer-dialog-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="rerecord-title"
+        >
+          <div className="sequencer-dialog">
+            <p
+              id="rerecord-title"
+              className="sequencer-dialog-text"
+            >
+              This pose was already recorded.
+              Re-record it?
+            </p>
+
+            <div className="sequencer-dialog-actions">
+              <button
+                type="button"
+                className="sequencer-btn sequencer-btn-secondary"
+                onClick={() =>
+                  setConfirmRerecordIndex(null)
+                }
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="sequencer-btn sequencer-btn-primary"
+                onClick={confirmRerecordYes}
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {view === "select" ? (
+        <div className="container-fluid py-4 sequencer-select-view">
+          <div className="sequencer-select-header px-3">
+            <div />
+            <div className="sequencer-counter">
+              {recordedCount} of {POSES.length} poses recorded
+            </div>
+          </div>
+
+          <div className="sequencer-select-intro">
+            <h1 className="sequencer-heading">
+              Select a Pose to Record
+            </h1>
+
+            <p className="sequencer-subheading">
+              Choose any pose from the list below.
+              You can record each pose independently.
+            </p>
+            <p className="sequencer-participant-id">{participantId}</p>
+          </div>
+
+          <div className="sequencer-filter-row px-3">
+            {categories.map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                className={`sequencer-filter-btn${categoryFilter === cat ? " active" : ""}`}
+                onClick={() => setCategoryFilter(cat)}
+              >
+                {cat}
+              </button>
+            ))}
+          </div>
+
+          <div className="sequencer-category-sections px-3">
+            {Object.entries(groupedVisiblePoses).map(([category, items]) => (
+              <section key={category} className="sequencer-category-section">
+                <h3 className="sequencer-category-title">{category} Poses</h3>
+                <div className="sequencer-pose-grid">
+                  {items.map(({ pose, poseIndex }) => {
+                    const recorded = isPoseRecorded(pose.name);
+                    return (
+                      <button
+                        key={pose.id}
+                        type="button"
+                        className={`sequencer-pose-card${
+                          recorded ? " sequencer-pose-card-recorded" : ""
+                        }`}
+                        onClick={() => handlePoseCardClick(poseIndex)}
+                      >
+                        <span className="sequencer-pose-card-name">{pose.name}</span>
+                        <span className="sequencer-pose-card-sanskrit">{pose.sanskrit}</span>
+                        <span className="sequencer-pose-meta">
+                          {pose.id} · {pose.duration}s
+                          {pose.variation ? ` · ${pose.variation}` : ""}
+                        </span>
+                        <span
+                          className={`sequencer-badge${
+                            recorded ? " sequencer-badge-recorded" : " sequencer-badge-pending"
+                          }`}
+                        >
+                          {recorded ? "Recorded ✓" : "Not recorded"}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+
+          <div className="sequencer-select-footer mt-5">
+            <button
+              type="button"
+              className="btn btn-success sequencer-btn-finish"
+              disabled={recordedCount < 1}
+              onClick={() => navigate("/review")}
+            >
+              Finish Session →
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="sequencer-record-root">
+          <div
+            className={
+              recordPhase === "getReady" ||
+              recordPhase === "recording" ||
+              recordPhase === "saved"
+                ? "sequencer-video-wrap sequencer-video-wrap-full"
+                : "sequencer-video-wrap"
+            }
+            style={{ position: "relative", width: "100%" }}
+          >
+            <video
+              ref={videoRef}
+              className={
+                recordPhase === "getReady" ||
+                recordPhase === "recording" ||
+                recordPhase === "saved"
+                  ? "sequencer-video-bg"
+                  : "sequencer-video-preview"
+              }
+              style={{
+                width: "100%",
+                height: "100%",
+                display: "block",
+                objectFit: "cover",
+              }}
+              autoPlay
+              playsInline
+              muted
+            />
+
+            <canvas
+              ref={canvasRef}
+              className={
+                recordPhase === "recording"
+                  ? "sequencer-canvas-overlay"
+                  : "sequencer-canvas-hidden"
+              }
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                pointerEvents: "none",
+              }}
+              aria-hidden
+            />
+          </div>
+
+          <div
+            className={
+              recordPhase === "recording" ||
+              recordPhase === "saved"
+                ? "sequencer-record-overlay sequencer-record-overlay-full"
+                : "sequencer-record-overlay"
+            }
+          >
+            <div className="sequencer-record-top">
+              <button
+                type="button"
+                className="sequencer-btn sequencer-btn-back"
+                onClick={() =>
+                  void handleBackToList()
+                }
+              >
+                ← Back to pose list
+              </button>
+            </div>
+
+            <div className="sequencer-record-title-block">
+              {recordPhase === "getReady" &&
+              currentPoseIndex != null ? (
+                <>
+                  <div className="pose-category-label">
+                    {POSES[currentPoseIndex].category}{" "}
+                    Pose
+                  </div>
+
+                  <div className="pose-code">
+                    {POSES[currentPoseIndex].id}
+                  </div>
+
+                  <div className="pose-name">
+                    {POSES[currentPoseIndex].name}
+                  </div>
+
+                  <div className="pose-sanskrit">
+                    {POSES[currentPoseIndex].sanskrit}
+                  </div>
+
+                  {POSES[currentPoseIndex].variation && (
+                    <div className="pose-variation">
+                      {POSES[currentPoseIndex].variation}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <h2 className="sequencer-heading-record">
+                    {selectedPose?.name}
+                  </h2>
+
+                  <p className="sequencer-sanskrit-record">
+                    {selectedPose?.sanskrit}
+                  </p>
+                </>
+              )}
+            </div>
+
+            {recordPhase === "getReady" && (
+              <div className="sequencer-phase-block">
+                <p className="sequencer-get-ready-msg">
+                  Get into position for{" "}
+                  {selectedPose?.name}
+                </p>
+
+                {currentPoseIndex != null ? (
+                  <p
+                    className="sequencer-pose-progress-text"
+                    style={{
+                      margin: "0 0 12px",
+                      fontSize: "0.95rem",
+                      fontWeight: 600,
+                      opacity: 0.85,
+                    }}
+                  >
+                    Pose {currentPoseIndex + 1} of {POSES.length}
+                  </p>
+                ) : null}
+
+                {currentPoseIndex != null ? (
+                  <div
+                    className="sequencer-pose-progress-dots"
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      justifyContent: "center",
+                      flexWrap: "wrap",
+                      marginBottom: 20,
+                    }}
+                  >
+                    {POSES.map((_, i) => (
+                      <span
+                        key={POSES[i].id}
+                        aria-hidden
+                        style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: "50%",
+                          background:
+                            i === currentPoseIndex
+                              ? "#f59e0b"
+                              : "rgba(255,255,255,0.25)",
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+
+                <div
+                  key={`cd-${getReadyCountdown}-${selectedPoseIndex}`}
+                  className="sequencer-countdown-number"
+                >
+                  {getReadyCountdown}
+                </div>
+              </div>
+            )}
+
+            {recordPhase === "recording" && (
+              <div className="sequencer-recording-ui">
+                <div className="sequencer-rec-top">
+                  <span className="sequencer-rec-badge">
+                    <span
+                      className="sequencer-rec-dot"
+                      aria-hidden
+                    />
+                    REC
+                  </span>
+                </div>
+
+                <div className="sequencer-rec-spacer" />
+
+                <div className="sequencer-rec-bottom">
+                  <p className="sequencer-rec-label">
+                    Recording...
+                  </p>
+
+                  <p className="sequencer-rec-remaining">
+                    {remainingRecording}s remaining
+                  </p>
+
+                  <div className="sequencer-recording-progress">
+                    <div
+                      className="sequencer-recording-progress-fill"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (recordingSeconds /
+                            durationSec) *
+                            100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    className="sequencer-btn-stop"
+                    disabled={isFinalizing}
+                    onClick={() =>
+                      void finalizeRecordingRef.current?.({ manual: true })
+                    }
+                  >
+                    {isFinalizing ? "Finalizing…" : "Stop Recording"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {recordPhase === "saved" && (
+              <div className="sequencer-phase-block">
+                <div className="sequencer-saved-banner">
+                  Saved ✓
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default SequencerPage;

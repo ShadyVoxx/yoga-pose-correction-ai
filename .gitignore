@@ -24,3 +24,7 @@ train_output.txt
 # Old model dir
 tfjs_model_new/
 frame_log.jsonl
+
+# Frontend (YogaTwin React app)
+frontend/node_modules/
+frontend/dist/

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YogaAlign — Live Step-by-Step Coach</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="index.css" />
+  <style>
+    .video-container {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      aspect-ratio: 16/9;
+      margin-bottom: var(--space-lg);
+      border: 1px solid var(--border-subtle);
+    }
+    .controls { display: flex; gap: 12px; justify-content: center; }
+    .btn-start {
+      background: var(--gradient-primary);
+      color: #fff;
+      padding: 14px 24px;
+      border: none;
+      border-radius: var(--radius-md);
+      font-weight: 600;
+      font-size: 1.1rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="ambient-bg" aria-hidden="true">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <h1 class="logo-text">YogaAlign Live</h1>
+        <p class="logo-subtitle">Real-Time Step-by-Step Coach</p>
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+    <section class="input-section" id="setup-section">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Choose Your Practice</h3>
+        </div>
+        <div class="select-wrapper">
+          <select id="pose-select">
+            <option value="" disabled>Select a pose...</option>
+            <option>Tadasana (Mountain Pose)</option>
+            <option>Vrkasana (Tree Pose)</option>
+            <option>Pada-hastasana (Hand-to-Foot Pose)</option>
+            <option>Ardha Cakrasana (Half-Wheel Pose)</option>
+            <option>Ardha Katichakrasana (Half Waist-Wheel Pose)</option>
+            <option selected>Trikonasana (Triangle Pose)</option>
+            <option>Parivritta Trikonasana (Revolved Triangle Pose)</option>
+            <option>Ardha Ustrasana (Half Camel Pose)</option>
+            <option>Vakrasana (Twisted Pose)</option>
+            <option>Makarasana (Crocodile Pose)</option>
+            <option>Bhujangasana (Cobra Pose)</option>
+            <option>Ardha Halasana (Half Plough Pose)</option>
+            <option>Savasana (Corpse Pose)</option>
+          </select>
+        </div>
+        <div class="controls" style="margin-top: 24px;">
+          <button class="btn-start" id="btn-start">Start Live Coaching</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

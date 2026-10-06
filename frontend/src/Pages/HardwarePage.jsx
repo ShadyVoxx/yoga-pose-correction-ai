@@ -1,0 +1,490 @@
+import React, { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useSession } from "../context/SessionContext";
+import CONFIG from "../config";
+import {
+  cardVariant,
+  countActiveOnline,
+  normalizeImuPollPayload,
+  slotOfflineMessage,
+  slotStatusLabel,
+} from "../utils/sensorStatus";
+import {
+  checkRecorderHealth,
+  getSessionsRootDisplay,
+  startOfflineSession,
+} from "../utils/sessionRecorderApi";
+import "./HardwarePage.css";
+
+function HardwarePage() {
+  const navigate = useNavigate();
+  const {
+    setTZero,
+    setCameraStream,
+    setOfflineSessionDirectory,
+    hardwareCalibrationConfirmed,
+    setHardwareCalibrationConfirmed,
+    participantId,
+    metadata,
+    username,
+    greeting,
+  } = useSession();
+
+  const [stream, setStream] = useState(null);
+  const [cameraError, setCameraError] = useState(null);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [calibrationDone, setCalibrationDone] = useState(hardwareCalibrationConfirmed);
+  const [imuDevices, setImuDevices] = useState({});
+  const [flaskReachable, setFlaskReachable] = useState(false);
+  const [recorderReachable, setRecorderReachable] = useState(false);
+  const [startupState, setStartupState] = useState("idle");
+  const [startupError, setStartupError] = useState("");
+  const [startupProgress, setStartupProgress] = useState([]);
+
+  const videoRef = useRef(null);
+  const retainedForSessionRef = useRef(false);
+
+  const dataUrl = CONFIG.FLASK_DATA_URL?.replace(/\/$/, "");
+  const syncUrl = CONFIG.FLASK_SYNC_URL?.replace(/\/$/, "");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 1920, height: 1080 },
+          audio: false,
+        });
+        if (cancelled) {
+          mediaStream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        if (videoRef.current) {
+          videoRef.current.srcObject = mediaStream;
+        }
+        setStream(mediaStream);
+        setCameraReady(true);
+      } catch {
+        if (!cancelled) {
+          setCameraError(
+            "Camera access denied. Please allow camera in browser settings and refresh the page."
+          );
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!stream) return;
+    return () => {
+      if (!retainedForSessionRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [stream]);
+
+  useEffect(() => {
+    setCalibrationDone(hardwareCalibrationConfirmed);
+  }, [hardwareCalibrationConfirmed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!CONFIG.USE_OFFLINE_SESSION_RECORDER) {
+        if (!cancelled) setRecorderReachable(false);
+        return;
+      }
+      const ok = await checkRecorderHealth();
+      if (!cancelled) setRecorderReachable(ok);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dataUrl) {
+      setFlaskReachable(false);
+      return;
+    }
+
+    let cancelled = false;
+    const statusUrl = `${dataUrl}/debug/imu`;
+    const pollMs = Math.max(500, Number(CONFIG.IMU_POLL_MS) || 1000);
+
+    const poll = async () => {
+      try {
+        const res = await fetch(statusUrl, { cache: "no-store" });
+        if (cancelled) return;
+        if (res.ok) {
+          const data = await res.json();
+          setFlaskReachable(true);
+
+          setImuDevices(normalizeImuPollPayload(data, CONFIG.SENSOR_SLOTS));
+        } else {
+          setFlaskReachable(false);
+          setImuDevices({});
+        }
+      } catch {
+        if (!cancelled) {
+          setFlaskReachable(false);
+          setImuDevices({});
+        }
+      }
+    };
+
+    void poll();
+    const id = window.setInterval(poll, pollMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [dataUrl]);
+
+  const addStartupStep = (label, ok, details = "") => {
+    setStartupProgress((prev) => [...prev, { label, ok, details }]);
+  };
+
+  const handleStartSession = async () => {
+    if (startupState === "starting") return;
+    setStartupState("starting");
+    setStartupError("");
+    setStartupProgress([]);
+
+    try {
+      const hasUser = Boolean((username || metadata?.username || metadata?.name || "").trim());
+      if (!hasUser) {
+        throw new Error("Missing username. Please complete registration first.");
+      }
+      addStartupStep("User profile validated", true);
+
+      if (!stream || !cameraReady || cameraError) {
+        throw new Error("Camera is not ready.");
+      }
+      addStartupStep("Camera initialized", true);
+
+      const hasMediaPipe = typeof window.Pose === "function";
+      if (!hasMediaPipe) {
+        throw new Error("MediaPipe pose model not loaded.");
+      }
+      addStartupStep("MediaPipe initialized", true);
+
+      if (CONFIG.USE_OFFLINE_SESSION_RECORDER) {
+        const recorderOk = await checkRecorderHealth();
+        if (!recorderOk) {
+          throw new Error(
+            "Offline session recorder is not running. Start: python backend/data_collection_server.py"
+          );
+        }
+        addStartupStep("Offline recorder connected", true, getSessionsRootDisplay());
+      }
+
+      addStartupStep(
+        "IMU sensors (optional)",
+        true,
+        liveCount > 0
+          ? `${liveCount} live (UDP :5000)`
+          : "none — video/landmarks only"
+      );
+
+      const canRecord = typeof MediaRecorder !== "undefined";
+      if (!canRecord) {
+        throw new Error("MediaRecorder is not available in this browser.");
+      }
+      addStartupStep("Recording engine initialized", true);
+
+      const canStore = typeof localStorage !== "undefined";
+      if (!canStore) {
+        throw new Error("Local storage unavailable.");
+      }
+      addStartupStep("Storage handlers initialized", true);
+
+      let flaskOk = false;
+      if (syncUrl) {
+        try {
+          const ping = await fetch(syncUrl, { method: "OPTIONS" });
+          flaskOk = ping.ok || ping.status === 204 || ping.status === 405;
+        } catch {
+          flaskOk = false;
+        }
+      }
+      addStartupStep("Flask bridge checked", flaskOk || flaskReachable, flaskReachable ? "polling data" : "check network");
+
+      addStartupStep(
+        "Local session storage",
+        true,
+        `sessions saved to ${getSessionsRootDisplay()}`
+      );
+
+      if (!calibrationDone) {
+        throw new Error("Calibration must be confirmed before starting.");
+      }
+      addStartupStep("Calibration confirmed", true);
+
+      const t0 = Date.now();
+      retainedForSessionRef.current = true;
+      setTZero(t0);
+      setCameraStream(stream);
+
+      if (CONFIG.USE_OFFLINE_SESSION_RECORDER) {
+        const started = await startOfflineSession({
+          tZero: t0 / 1000,
+          participantId,
+          participantName: username || metadata?.username || metadata?.name,
+          sessionNumber: metadata?.sessionNumber,
+          videoFps: 30,
+        });
+        if (started?.directory) {
+          setOfflineSessionDirectory(started.directory);
+        }
+      } else if (syncUrl) {
+        await fetch(syncUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tZero: t0 }),
+        }).catch(() => {});
+      }
+
+      setStartupState("ready");
+      navigate("/sequencer");
+    } catch (err) {
+      setStartupState("error");
+      setStartupError(err?.message || "Failed to initialize session");
+    }
+  };
+
+  const systemsReady = cameraReady && calibrationDone;
+
+  const liveCount = countActiveOnline(imuDevices, CONFIG.SENSOR_SLOTS);
+  const disconnectedCount = CONFIG.ACTIVE_SENSOR_COUNT - liveCount;
+
+  return (
+    <div className="container-fluid py-4">
+      <div className="row g-4">
+        <div className="col-12 col-lg-7">
+          {cameraError ? (
+            <div className="alert alert-danger" role="alert">
+              {cameraError}
+            </div>
+          ) : (
+            <div
+              className="video-container"
+              style={{ position: "relative", width: "100%" }}
+            >
+              <video
+                ref={videoRef}
+                className="w-100"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  display: "block",
+                  objectFit: "cover",
+                }}
+                muted
+                autoPlay
+                playsInline
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="col-12 col-lg-5">
+          <div className="card status-card shadow-sm">
+            <div className="card-body">
+              <h2 className="h5 card-title mb-2">
+                {greeting}, {username || metadata?.name || "participant"}
+              </h2>
+              <p className="small text-muted mb-0">
+                Complete startup checks, then begin the guided sequencing session.
+              </p>
+            </div>
+          </div>
+
+          <div className="card status-card shadow-sm">
+            <div className="card-body">
+              <h2 className="h5 card-title mb-3">Sensor Status</h2>
+
+              <div className="status-row">
+                <span className="fw-medium">Camera</span>
+                {cameraReady ? (
+                  <span className="badge bg-success">Connected ✓</span>
+                ) : cameraError ? (
+                  <span className="badge bg-danger">Access Denied ✗</span>
+                ) : (
+                  <span className="badge bg-secondary">Connecting…</span>
+                )}
+              </div>
+
+              <div className="status-row">
+                <span className="fw-medium">Flask IMU bridge</span>
+                {flaskReachable ? (
+                  <span className="badge bg-success">Reachable</span>
+                ) : (
+                  <span className="badge bg-secondary">Not reachable</span>
+                )}
+              </div>
+
+              <div className="sensor-summary">
+                <span className="text-success">
+                  🟢 {liveCount} Connected
+                </span>
+                <span className="text-danger ms-3">
+                  🔴 {disconnectedCount} Disconnected
+                </span>
+              </div>
+
+              <div className="sensor-grid">
+                {CONFIG.SENSOR_SLOTS.map((slot) => {
+                  const liveData = imuDevices[slot.id];
+                  const isLive = liveData?.online === true;
+                  const variant = cardVariant(slot, isLive);
+                  const badgeClass = isLive
+                    ? "badge-live"
+                    : slot.status === "placeholder"
+                      ? "badge-placeholder"
+                      : "badge-timeout";
+
+                  return (
+                    <div
+                      key={slot.id}
+                      className={`sensor-card sensor-card--${variant}`}
+                    >
+                      <div className="sensor-card__header">
+                        <span className="sensor-id">{slot.label}</span>
+                        <span className={`sensor-badge ${badgeClass}`}>
+                          {isLive
+                            ? "🟢 Connected"
+                            : slot.status === "placeholder"
+                              ? "⚪ Placeholder"
+                              : "🔴 Disconnected"}
+                        </span>
+                      </div>
+
+                      <div className="sensor-body-part">📍 {slot.bodyPart}</div>
+
+                      {isLive && (
+                        <div className="sensor-data">
+                          <div>
+                            🔋 {liveData.voltage != null ? `${liveData.voltage.toFixed(2)} V` : "—"}
+                          </div>
+                          <div>
+                            📶 {liveData.rssi != null ? `${liveData.rssi} dBm` : "—"}
+                          </div>
+                          <div>
+                            📦 {liveData.packet_count != null ? liveData.packet_count : "—"}
+                          </div>
+                        </div>
+                      )}
+
+                      {!isLive && (
+                        <div
+                          className={
+                            slot.status === "placeholder"
+                              ? "sensor-placeholder-msg"
+                              : "sensor-timeout-msg"
+                          }
+                        >
+                          {slotOfflineMessage(slot)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="card status-card shadow-sm">
+            <div className="card-body">
+              <h2 className="h5 card-title">Pre-Session Calibration</h2>
+              <p className="text-muted small mb-3">
+                Ask the participant to stand upright facing the camera in Mountain Pose (Tadasana).
+                Ensure full body is visible in the frame.
+              </p>
+              <button
+                type="button"
+                className="btn btn-success w-100"
+                disabled={calibrationDone}
+                onClick={() => {
+                  setCalibrationDone(true);
+                  setHardwareCalibrationConfirmed(true);
+                }}
+              >
+                {calibrationDone ? "Calibration Complete ✓" : "Confirm Calibration ✓"}
+              </button>
+              {calibrationDone ? (
+                <p className="small text-success mt-2 mb-0">Ready to begin session</p>
+              ) : null}
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-primary w-100 start-btn"
+            disabled={!systemsReady || startupState === "starting"}
+            onClick={handleStartSession}
+          >
+            {startupState === "starting"
+              ? "Starting session..."
+              : !cameraReady
+                ? "Waiting for camera..."
+                : !calibrationDone
+                  ? "Confirm calibration first"
+                  : "Start Session →"}
+          </button>
+          {liveCount === 0 && (
+            <div className="alert alert-info mt-2 py-2" style={{ fontSize: "0.85rem" }}>
+              ℹ️ No IMU sensors detected. Session will record video and landmarks only. IMU data will
+              be empty in the exported files.
+            </div>
+          )}
+          {liveCount > 0 && liveCount < CONFIG.ACTIVE_SENSOR_COUNT && (
+              <div className="alert alert-warning mt-2 py-2" style={{ fontSize: "0.85rem" }}>
+                ⚠️ {liveCount} of {CONFIG.ACTIVE_SENSOR_COUNT} sensors detected.
+                Recording will use available sensors only.
+              </div>
+            )}
+          {liveCount >= CONFIG.ACTIVE_SENSOR_COUNT && (
+            <div className="alert alert-success mt-2 py-2" style={{ fontSize: "0.85rem" }}>
+              ✅ All {CONFIG.ACTIVE_SENSOR_COUNT} sensors connected. Ready to record.
+            </div>
+          )}
+          {startupProgress.length > 0 && (
+            <div className="startup-panel mt-3">
+              {startupProgress.map((step, idx) => (
+                <div key={`${step.label}-${idx}`} className="startup-row">
+                  <span>{step.ok ? "✅" : "⚠"}</span>
+                  <span className="fw-medium">{step.label}</span>
+                  {step.details ? <small className="text-muted">{step.details}</small> : null}
+                </div>
+              ))}
+            </div>
+          )}
+          {startupState === "error" && startupError ? (
+            <div className="alert alert-danger mt-3 py-2 mb-0" role="alert">
+              {startupError}
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-danger ms-2"
+                onClick={() => {
+                  setStartupState("idle");
+                  setStartupError("");
+                  setStartupProgress([]);
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default HardwarePage;

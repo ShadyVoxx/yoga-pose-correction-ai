@@ -1,0 +1,121 @@
+{
+  "_doc": {
+    "title": "YogaAlign → Unreal Engine Digital Twin — Data Format Spec",
+    "version": "1.0",
+    "channels": {
+      "frame_log.jsonl": "JSON Lines file written by the Node server. One JSON object per line. UE polls/reads this file and processes new lines as they arrive.",
+      "UDP": "Real-time UDP socket to 10.20.15.206:5000. One packet per analyzed frame. Pipe-delimited text string."
+    }
+  },
+
+  "frame_log_jsonl": {
+    "description": "Each line of frame_log.jsonl is one of these objects (parse with JSON.parse per line).",
+    "schema": {
+      "frameID":         { "type": "integer", "description": "Monotonically increasing frame counter, resets on server restart" },
+      "timestamp":       { "type": "string",  "description": "ISO 8601 UTC timestamp of the analyzed frame" },
+      "userName":        { "type": "string|null", "description": "Participant name entered at login" },
+      "age":             { "type": "integer|null", "description": "Participant age entered at login" },
+      "ageGroup":        { "type": "string|null",  "enum": ["under40", "40plus", null] },
+      "poseName":        { "type": "string", "description": "Full pose name e.g. 'Tadasana (Mountain Pose)'" },
+      "stepIndex":       { "type": "integer", "description": "0-based step within the pose (0 = first step)" },
+      "stepLabel":       { "type": "string",  "description": "Human-readable step instruction text from yoga book" },
+      "isMatch":         { "type": "boolean", "description": "true if pose step is correctly performed" },
+      "matchConfidence": { "type": "number",  "description": "Model softmax confidence for matched class [0.0 – 1.0]" },
+      "feedback":        { "type": "string",  "description": "Corrective feedback text shown to user" },
+      "source":          { "type": "string",  "enum": ["ml", "ollama"], "description": "Which subsystem generated this event" },
+      "model":           { "type": "string|null", "description": "Ollama model name if source=ollama, else null" },
+      "stepText":        { "type": "string|null", "description": "Yoga book rubric injected into LLM prompt (source=ollama only)" },
+      "ollamaStepComplete": { "type": "boolean|null", "description": "Whether LLM judged the step complete (source=ollama only)" },
+      "landmarks": {
+        "type": "array",
+        "length": 33,
+        "description": "Raw MediaPipe Pose landmark array (world-space, NOT normalized)",
+        "item": { "x": "number", "y": "number", "z": "number", "visibility": "number [0–1]" }
+      },
+      "idealLandmarks": {
+        "type": "array|null",
+        "length": 33,
+        "description": "Median landmark positions for this pose+step computed from training data. Same schema as landmarks."
+      },
+      "deviation": {
+        "type": "array|null",
+        "length": 33,
+        "description": "Per-landmark displacement from ideal (landmark[i] - idealLandmark[i])",
+        "item": { "dx": "number", "dy": "number", "dz": "number" }
+      }
+    },
+    "example": {
+      "frameID": 42,
+      "timestamp": "2026-07-31T10:16:11.000Z",
+      "userName": "Dhivya",
+      "age": 26,
+      "ageGroup": "under40",
+      "poseName": "Tadasana (Mountain Pose)",
+      "stepIndex": 0,
+      "stepLabel": "Stand upright with feet together",
+      "isMatch": false,
+      "matchConfidence": 0.6812,
+      "feedback": "Straighten your left knee",
+      "source": "ml",
+      "model": null,
+      "stepText": null,
+      "ollamaStepComplete": null,
+      "landmarks": [
+        { "x": 0.512, "y": 0.134, "z": -0.023, "visibility": 0.999 },
+        "... (33 total)"
+      ],
+      "idealLandmarks": [
+        { "x": 0.501, "y": 0.128, "z": -0.018, "visibility": 1.0 },
+        "... (33 total)"
+      ],
+      "deviation": [
+        { "dx": 0.011, "dy": 0.006, "dz": -0.005 },
+        "... (33 total)"
+      ]
+    }
+  },
+
+  "udp_packet": {
+    "description": "Real-time UDP packet sent to 10.20.15.206:5000 per analyzed frame. UTF-8 text string.",
+    "host": "10.20.15.206",
+    "port": 5000,
+    "format": "FrameID|X,Y,Z,dX,dY,dZ|X,Y,Z,dX,dY,dZ|... (17 bone segments)",
+    "precision": "3 decimal places",
+    "bone_mapping": [
+      { "index": 0,  "name": "Head",              "mediapipe": "lm[0] (nose)" },
+      { "index": 1,  "name": "Spine03 UpperChest","mediapipe": "midpoint(lm[11], lm[12]) — shoulder midpoint" },
+      { "index": 2,  "name": "Spine01 LowerTorso","mediapipe": "midpoint(lm[23], lm[24]) — hip midpoint" },
+      { "index": 3,  "name": "Clavicle_L",        "mediapipe": "lm[11] — left shoulder" },
+      { "index": 4,  "name": "Clavicle_R",        "mediapipe": "lm[12] — right shoulder" },
+      { "index": 5,  "name": "UpperArm_L",        "mediapipe": "midpoint(lm[11], lm[13]) — left upper arm" },
+      { "index": 6,  "name": "UpperArm_R",        "mediapipe": "midpoint(lm[12], lm[14]) — right upper arm" },
+      { "index": 7,  "name": "LowerArm_L",        "mediapipe": "lm[13] — left elbow" },
+      { "index": 8,  "name": "LowerArm_R",        "mediapipe": "lm[14] — right elbow" },
+      { "index": 9,  "name": "Hand_L",             "mediapipe": "lm[15] — left wrist" },
+      { "index": 10, "name": "Hand_R",             "mediapipe": "lm[16] — right wrist" },
+      { "index": 11, "name": "Thigh_L",            "mediapipe": "midpoint(lm[23], lm[25]) — left hip→knee" },
+      { "index": 12, "name": "Thigh_R",            "mediapipe": "midpoint(lm[24], lm[26]) — right hip→knee" },
+      { "index": 13, "name": "Calf_L",             "mediapipe": "lm[25] — left knee" },
+      { "index": 14, "name": "Calf_R",             "mediapipe": "lm[26] — right knee" },
+      { "index": 15, "name": "Foot_L",             "mediapipe": "lm[27] — left ankle" },
+      { "index": 16, "name": "Foot_R",             "mediapipe": "lm[28] — right ankle" }
+    ],
+    "example_packet": "42|0.512,0.134,-0.023,0.011,0.006,-0.005|0.501,0.198,-0.012,0.000,0.001,0.002|..."
+  },
+
+  "pose_ids": {
+    "STA-01": "Tadasana (Mountain Pose)",
+    "STA-02": "Vrkasana (Tree Pose)",
+    "STA-03": "Pada-hastasana (Hand-to-Foot Pose)",
+    "STA-04-I":  "Ardha Cakrasana (Half-Wheel Pose)",
+    "STA-04-II": "Ardha Katichakrasana (Half Waist-Wheel Pose)",
+    "STA-05-I":  "Trikonasana (Triangle Pose)",
+    "STA-05-II": "Parivritta Trikonasana (Revolved Triangle Pose)",
+    "SIA-01": "Ardha Ustrasana (Half Camel Pose)",
+    "SIA-02": "Vakrasana (Twisted Pose)",
+    "PR-01":  "Makarasana (Crocodile Pose)",
+    "PR-02":  "Bhujangasana (Cobra Pose)",
+    "SU-01":  "Ardha Halasana (Half Plough Pose)",
+    "SU-02":  "Savasana (Corpse Pose)"
+  }
+}

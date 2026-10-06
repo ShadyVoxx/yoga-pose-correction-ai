@@ -1,0 +1,46 @@
+<svg viewBox="0 0 800 620" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <defs>
+    <linearGradient id="video" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b3a"/>
+      <stop offset="50%" stop-color="#2d2454"/>
+      <stop offset="100%" stop-color="#1a1530"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="620" fill="#0a0a12"/>
+  <!-- header -->
+  <line x1="0" y1="64" x2="800" y2="64" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+  <text x="32" y="32" fill="#ffffff" font-size="22" font-weight="700">YogaAlign Live</text>
+  <text x="32" y="50" fill="rgba(240,238,246,0.6)" font-size="12">Real-Time Step-by-Step Coach</text>
+
+  <!-- video container -->
+  <rect x="32" y="90" width="736" height="300" rx="14" fill="url(#video)" stroke="rgba(255,255,255,0.06)"/>
+  <!-- pose silhouette -->
+  <g transform="translate(360,160)" stroke="rgba(255,255,255,0.4)" stroke-width="3" fill="none">
+    <circle cx="40" cy="20" r="14"/>
+    <line x1="40" y1="34" x2="40" y2="100"/>
+    <line x1="40" y1="55" x2="5" y2="40"/>
+    <line x1="40" y1="55" x2="100" y2="85"/>
+    <line x1="40" y1="100" x2="10" y2="155"/>
+    <line x1="40" y1="100" x2="75" y2="150"/>
+  </g>
+  <text x="400" y="335" fill="rgba(255,255,255,0.35)" font-size="14" text-anchor="middle">Live camera feed + MediaPipe landmark overlay</text>
+
+  <!-- status indicator -->
+  <rect x="650" y="106" width="100" height="28" rx="14" fill="rgba(0,0,0,0.6)"/>
+  <circle cx="666" cy="120" r="4" fill="#f87171"/>
+  <text x="678" y="124" fill="#ffffff" font-size="12">Watching...</text>
+
+  <!-- step card -->
+  <rect x="32" y="410" width="736" height="150" rx="14" fill="rgba(22,22,42,0.85)" stroke="rgba(167,139,250,0.3)"/>
+  <text x="400" y="442" fill="#fbbf24" font-size="12" font-weight="700" letter-spacing="2" text-anchor="middle">STEP 4 OF 7</text>
+  <text x="400" y="475" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">Exhale, slowly bend to the right side and place the</text>
+  <text x="400" y="500" fill="#ffffff" font-size="19" font-weight="700" text-anchor="middle">right hand fingers just behind the right foot.</text>
+
+  <rect x="60" y="515" width="680" height="34" rx="8" fill="rgba(255,255,255,0.05)"/>
+  <rect x="60" y="515" width="4" height="34" fill="#fbbf24"/>
+  <text x="76" y="537" fill="rgba(240,238,246,0.75)" font-size="13">⚠ Keep adjusting. Hips not yet aligned for this step (model confidence 71.4%)</text>
+
+  <!-- stop button -->
+  <rect x="345" y="580" width="110" height="36" rx="8" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.06)"/>
+  <text x="400" y="603" fill="#ffffff" font-size="13" font-weight="600" text-anchor="middle">Stop Practice</text>
+</svg>

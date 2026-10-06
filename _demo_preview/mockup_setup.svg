@@ -1,0 +1,32 @@
+<svg viewBox="0 0 800 520" xmlns="http://www.w3.org/2000/svg" font-family="Arial, sans-serif">
+  <defs>
+    <linearGradient id="primary" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7c3aed"/>
+      <stop offset="40%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="520" fill="#0a0a12"/>
+  <!-- header -->
+  <rect width="800" height="64" fill="#0a0a12" opacity="0.9"/>
+  <line x1="0" y1="64" x2="800" y2="64" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>
+  <text x="32" y="32" fill="#ffffff" font-size="22" font-weight="700">YogaAlign Live</text>
+  <text x="32" y="50" fill="rgba(240,238,246,0.6)" font-size="12">Real-Time Step-by-Step Coach</text>
+
+  <!-- card -->
+  <rect x="200" y="140" width="400" height="240" rx="16" fill="rgba(22,22,42,0.85)" stroke="rgba(255,255,255,0.06)"/>
+  <text x="230" y="185" fill="#ffffff" font-size="18" font-weight="700">Choose Your Practice</text>
+
+  <!-- select -->
+  <rect x="230" y="210" width="340" height="46" rx="10" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.1)"/>
+  <text x="248" y="239" fill="#ffffff" font-size="15">Trikonasana (Triangle Pose)</text>
+  <path d="M548 228 l8 8 l8 -8" stroke="#ffffff" stroke-width="2" fill="none"/>
+
+  <!-- button -->
+  <rect x="295" y="290" width="210" height="50" rx="10" fill="url(#primary)"/>
+  <text x="400" y="321" fill="#ffffff" font-size="16" font-weight="600" text-anchor="middle">Start Live Coaching</text>
+
+  <!-- ambient glow accents -->
+  <circle cx="80" cy="450" r="120" fill="#7c3aed" opacity="0.12"/>
+  <circle cx="740" cy="80" r="100" fill="#f59e0b" opacity="0.10"/>
+</svg>
