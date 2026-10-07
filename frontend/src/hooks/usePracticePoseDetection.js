@@ -18,6 +18,10 @@ const WASM_BASE = "/assets/mediapipe/wasm";
 const MODEL_PATH =
   "/assets/mediapipe/models/pose_landmarker_lite.task";
 
+// How often to hit the ML backend (ms). 1500ms = ~once every 1.5s —
+// enough to feel live without hammering local compute.
+const ML_UPDATE_MS = 1500;
+
 const CORE_INDICES = [
   POSE_LM.LEFT_SHOULDER,
   POSE_LM.RIGHT_SHOULDER,
@@ -43,21 +47,31 @@ function syncCanvasToVideo(canvas, video) {
 
 /**
  * Loads MediaPipe PoseLandmarker, draws skeleton on canvas, updates practice context (throttled).
+ * Every ML_UPDATE_MS it also POSTs landmarks to /api/analyze-frame so the server-side
+ * TF.js model + posture descriptors can produce richer corrective feedback.
  */
 export function usePracticePoseDetection({
   videoRef,
   canvasRef,
   enabled,
   practicePoseName,
+  currentStepIndex = 0,
+  userName,
+  age,
   setDetectedPose,
   setConfidence,
   setCorrections,
+  setMlFeedback,
 }) {
   const [mediapipeError, setMediapipeError] = useState(null);
   const lastVideoTimeRef = useRef(-1);
   const lastUiUpdateRef = useRef(0);
+  const lastMlUpdateRef = useRef(0);
+  const mlPendingRef = useRef(false);
   const practicePoseNameRef = useRef(practicePoseName);
   practicePoseNameRef.current = practicePoseName;
+  const currentStepIndexRef = useRef(currentStepIndex);
+  currentStepIndexRef.current = currentStepIndex;
 
   useEffect(() => {
     if (!enabled) {
@@ -180,6 +194,47 @@ export function usePracticePoseDetection({
             const label = practicePoseNameRef.current;
             setDetectedPose(conf >= 48 ? label : "—");
           }
+
+          // ── ML backend call (throttled) ──────────────────────────────────
+          // Fire-and-forget: send raw landmarks to the server TF.js model every
+          // ML_UPDATE_MS. The server normalises, runs the 74-class classifier,
+          // applies posture descriptors, and returns richer corrective text.
+          // We skip if a request is already in-flight (mlPendingRef) so we
+          // never queue up a backlog.
+          if (
+            now - lastMlUpdateRef.current >= ML_UPDATE_MS &&
+            !mlPendingRef.current &&
+            practicePoseNameRef.current
+          ) {
+            lastMlUpdateRef.current = now;
+            mlPendingRef.current = true;
+            const poseName = practicePoseNameRef.current;
+            const stepIndex = currentStepIndexRef.current;
+            fetch("/api/analyze-frame", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                poseName,
+                currentStepIndex: stepIndex,
+                landmarks,
+                userName: userName ?? null,
+                age: age ?? null,
+              }),
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((data) => {
+                if (data?.analysis?.feedback) {
+                  if (typeof setMlFeedback === "function") {
+                    setMlFeedback(data.analysis.feedback);
+                  }
+                }
+              })
+              .catch(() => {})
+              .finally(() => {
+                mlPendingRef.current = false;
+              });
+          }
+          // ────────────────────────────────────────────────────────────────
         } else {
           if (now - lastUiUpdateRef.current >= UI_UPDATE_MS) {
             lastUiUpdateRef.current = now;

@@ -51,6 +51,7 @@ const PracticeSessionPage = () => {
   const [saving, setSaving] = useState(false);
   const [backendReady, setBackendReady] = useState(false);
   const [instructionPhase, setInstructionPhase] = useState(null);
+  const [mlFeedback, setMlFeedback] = useState(null);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -287,9 +288,11 @@ const PracticeSessionPage = () => {
     canvasRef,
     enabled: poseDetectionEnabled,
     practicePoseName: pose?.name ?? "",
+    currentStepIndex: 0,
     setDetectedPose,
     setConfidence,
     setCorrections,
+    setMlFeedback,
   });
 
   const remaining = Math.max(0, MAX_RECORDING_SECONDS - elapsedSeconds);
@@ -482,6 +485,13 @@ const PracticeSessionPage = () => {
                       </ul>
                     )}
                   </div>
+
+                  {mlFeedback && (
+                    <div className="practice-session__ml-feedback p-3 rounded border" style={{ background: "#f0f7ff", borderColor: "#90caf9" }}>
+                      <div className="small text-uppercase text-muted mb-1">🤖 AI Analysis</div>
+                      <p className="mb-0 small">{mlFeedback}</p>
+                    </div>
+                  )}
                 </>
               )}
 
