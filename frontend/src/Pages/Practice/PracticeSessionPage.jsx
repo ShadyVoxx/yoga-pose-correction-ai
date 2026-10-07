@@ -52,6 +52,7 @@ const PracticeSessionPage = () => {
   const [backendReady, setBackendReady] = useState(false);
   const [instructionPhase, setInstructionPhase] = useState(null);
   const [mlFeedback, setMlFeedback] = useState(null);
+  const [ollamaFeedback, setOllamaFeedback] = useState(null);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -293,6 +294,7 @@ const PracticeSessionPage = () => {
     setConfidence,
     setCorrections,
     setMlFeedback,
+    setOllamaFeedback,
   });
 
   const remaining = Math.max(0, MAX_RECORDING_SECONDS - elapsedSeconds);
@@ -490,6 +492,13 @@ const PracticeSessionPage = () => {
                     <div className="practice-session__ml-feedback p-3 rounded border" style={{ background: "#f0f7ff", borderColor: "#90caf9" }}>
                       <div className="small text-uppercase text-muted mb-1">🤖 AI Analysis</div>
                       <p className="mb-0 small">{mlFeedback}</p>
+                    </div>
+                  )}
+
+                  {ollamaFeedback && (
+                    <div className="practice-session__ollama-feedback p-3 rounded border" style={{ background: "#f3f0ff", borderColor: "#b39ddb" }}>
+                      <div className="small text-uppercase text-muted mb-1">💬 Coach</div>
+                      <p className="mb-0 small">{ollamaFeedback}</p>
                     </div>
                   )}
                 </>
