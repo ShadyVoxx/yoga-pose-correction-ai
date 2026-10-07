@@ -1,17 +1,12 @@
-import { useState } from "react";
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import "./Yog1.css";
 
 const Yog1 = () => {
-  const [isStartPose , setIsStartPose] = useState(false)
+  const navigate = useNavigate();
 
   function startYoga() {
-    setIsStartPose(true);
-    fetch("http://localhost:8080/api/mediapipe/yog1", {
-      method: "POST",
-    }).then((response) => {
-      console.log("scripted called sucessfull in the frontend");
-    });
+    navigate("/practice");
   }
 
 
