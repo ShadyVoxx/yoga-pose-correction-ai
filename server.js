@@ -1191,6 +1191,160 @@ app.get('/api/ideal-landmarks', (_req, res) => {
 // UE → server messages are parsed but currently unused (reserved for
 // acknowledgements or IMU data once the sensor pipeline is wired up).
 
+// ─────────────────────────────────────────────────────────────────────────────
+// React Frontend API Routes (YogaTwin frontend integration)
+// Simple file-backed store — no external DB needed for standalone deployment.
+// Users, sessions and practice records are persisted to JSON files.
+// ─────────────────────────────────────────────────────────────────────────────
+import { createHash, randomBytes } from 'crypto';
+
+const USERS_FILE    = join(__dirname, 'users.json');
+const SESSIONS_FILE = join(__dirname, 'sessions.json');
+const PRACTICES_FILE = join(__dirname, 'practices.json');
+
+function loadJSON(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
+}
+function saveJSON(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+}
+
+// Ensure files exist
+if (!fs.existsSync(USERS_FILE))    saveJSON(USERS_FILE, []);
+if (!fs.existsSync(SESSIONS_FILE)) saveJSON(SESSIONS_FILE, []);
+if (!fs.existsSync(PRACTICES_FILE)) saveJSON(PRACTICES_FILE, []);
+
+function hashPassword(pw) {
+  return createHash('sha256').update(pw + 'yogaalign_salt').digest('hex');
+}
+function makeToken(userId) {
+  return Buffer.from(`${userId}:${randomBytes(16).toString('hex')}`).toString('base64');
+}
+function verifyToken(req) {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) return null;
+  try {
+    const [userId] = Buffer.from(auth.slice(7), 'base64').toString().split(':');
+    const users = loadJSON(USERS_FILE, []);
+    return users.find(u => String(u.id) === String(userId)) || null;
+  } catch { return null; }
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+app.post('/api/auth/signup', (req, res) => {
+  const { email, password, name, age, height_cm, weight_kg, gender, experience } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  const users = loadJSON(USERS_FILE, []);
+  if (users.find(u => u.email === email)) return res.status(409).json({ error: 'Email already registered' });
+  const user = { id: Date.now(), email, name: name || '', age: age || null, height_cm: height_cm || null,
+                 weight_kg: weight_kg || null, gender: gender || null, experience: experience || null,
+                 passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
+  users.push(user);
+  saveJSON(USERS_FILE, users);
+  const { passwordHash: _, ...safeUser } = user;
+  res.json({ token: makeToken(user.id), user: safeUser });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  const users = loadJSON(USERS_FILE, []);
+  const user = users.find(u => u.email === email && u.passwordHash === hashPassword(password));
+  if (!user) return res.status(401).json({ error: 'Invalid email or password' });
+  const { passwordHash: _, ...safeUser } = user;
+  res.json({ token: makeToken(user.id), user: safeUser });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { passwordHash: _, ...safeUser } = user;
+  res.json({ user: safeUser });
+});
+
+// ── Sessions ─────────────────────────────────────────────────────────────────
+app.post('/api/sessions/start', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const sessions = loadJSON(SESSIONS_FILE, []);
+  const session = { id: Date.now(), userId: user.id, startedAt: new Date().toISOString(), endedAt: null };
+  sessions.push(session);
+  saveJSON(SESSIONS_FILE, sessions);
+  res.json(session);
+});
+
+app.post('/api/sessions/:id/end', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const sessions = loadJSON(SESSIONS_FILE, []);
+  const session = sessions.find(s => String(s.id) === String(req.params.id) && s.userId === user.id);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  session.endedAt = new Date().toISOString();
+  saveJSON(SESSIONS_FILE, sessions);
+  res.json(session);
+});
+
+// ── Practices ─────────────────────────────────────────────────────────────────
+app.post('/api/practices', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const practices = loadJSON(PRACTICES_FILE, []);
+  const practice = { id: Date.now(), userId: user.id, ...req.body, createdAt: new Date().toISOString() };
+  practices.push(practice);
+  saveJSON(PRACTICES_FILE, practices);
+  res.json(practice);
+});
+
+app.get('/api/practices/session/:sessionId', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const practices = loadJSON(PRACTICES_FILE, []).filter(
+    p => p.userId === user.id && String(p.session_id) === String(req.params.sessionId)
+  );
+  const by_pose = Object.values(
+    practices.reduce((acc, p) => {
+      if (!acc[p.pose_name]) acc[p.pose_name] = { pose_name: p.pose_name, total_count: 0 };
+      acc[p.pose_name].total_count++;
+      return acc;
+    }, {})
+  );
+  res.json({ practices, by_pose });
+});
+
+app.get('/api/practices/user/history', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const sessions = loadJSON(SESSIONS_FILE, []).filter(s => s.userId === user.id);
+  const practices = loadJSON(PRACTICES_FILE, []).filter(p => p.userId === user.id);
+  const sessionsWithPractices = sessions.map(s => ({
+    ...s,
+    practices: practices.filter(p => String(p.session_id) === String(s.id)),
+  }));
+  res.json({ sessions: sessionsWithPractices });
+});
+
+app.get('/api/practices/user/stats', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const practices = loadJSON(PRACTICES_FILE, []).filter(p => p.userId === user.id);
+  const byPose = Object.values(
+    practices.reduce((acc, p) => {
+      if (!acc[p.pose_name]) acc[p.pose_name] = { pose_name: p.pose_name, count: 0, total_seconds: 0 };
+      acc[p.pose_name].count++;
+      acc[p.pose_name].total_seconds += Number(p.duration_seconds || 0);
+      return acc;
+    }, {})
+  );
+  res.json({ rows: byPose });
+});
+
+// ── Health / utility stubs (used by frontend status checks) ──────────────────
+app.get('/health', (_req, res) => res.json({ status: 'ok', server: 'yogaalign', port: PORT }));
+app.get('/storage/volumes', (_req, res) => res.json({ volumes: [] }));
+app.get('/sync/gdrive/status', (_req, res) => res.json({ synced: false, message: 'GDrive sync not configured' }));
+app.get('/session/download/zip', (_req, res) => res.status(501).json({ error: 'Download not available in this deployment' }));
+app.get('/debug/imu', (_req, res) => res.json({ imu: [], message: 'IMU stream not connected' }));
+
+// ─────────────────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => {
   console.log(`\n🧘 Yoga Pose Coach (Real-Time Step Verification)`);
   console.log(`   HTTP  → http://localhost:${PORT}`);
