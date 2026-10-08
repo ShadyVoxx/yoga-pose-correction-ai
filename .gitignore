@@ -28,3 +28,5 @@ frame_log.jsonl
 # Frontend (YogaTwin React app)
 frontend/node_modules/
 frontend/dist/
+gdrive_credentials.json
+.env

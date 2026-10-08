@@ -1192,152 +1192,203 @@ app.get('/api/ideal-landmarks', (_req, res) => {
 // acknowledgements or IMU data once the sensor pipeline is wired up).
 
 // ─────────────────────────────────────────────────────────────────────────────
-// React Frontend API Routes (YogaTwin frontend integration)
-// Simple file-backed store — no external DB needed for standalone deployment.
-// Users, sessions and practice records are persisted to JSON files.
 // ─────────────────────────────────────────────────────────────────────────────
-import { createHash, randomBytes } from 'crypto';
+// React Frontend API Routes — PostgreSQL + JWT
+// Schema: schema.sql   Credentials: .env
+// ─────────────────────────────────────────────────────────────────────────────
+import pkg from 'pg';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 
-const USERS_FILE    = join(__dirname, 'users.json');
-const SESSIONS_FILE = join(__dirname, 'sessions.json');
-const PRACTICES_FILE = join(__dirname, 'practices.json');
+const { Pool } = pkg;
+const db = new Pool({
+  host:     process.env.DB_HOST     || 'localhost',
+  port:     parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME     || 'yoga_app',
+  user:     process.env.DB_USER     || 'postgres',
+  password: process.env.DB_PASSWORD || 'admin123',
+});
+const JWT_SECRET = process.env.JWT_SECRET || 'yogaalign_dev_secret';
+const SALT_ROUNDS = 10;
 
-function loadJSON(file, fallback) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
-}
-function saveJSON(file, data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
+// Test DB connection at startup (non-fatal — server still starts if DB is down)
+db.query('SELECT 1').then(() => console.log('   DB    → PostgreSQL connected'))
+  .catch(e => console.warn('   DB    ⚠ PostgreSQL not reachable:', e.message));
+
+function makeJwt(userId) {
+  return jwt.sign({ sub: userId }, JWT_SECRET, { expiresIn: '7d' });
 }
 
-// Ensure files exist
-if (!fs.existsSync(USERS_FILE))    saveJSON(USERS_FILE, []);
-if (!fs.existsSync(SESSIONS_FILE)) saveJSON(SESSIONS_FILE, []);
-if (!fs.existsSync(PRACTICES_FILE)) saveJSON(PRACTICES_FILE, []);
-
-function hashPassword(pw) {
-  return createHash('sha256').update(pw + 'yogaalign_salt').digest('hex');
-}
-function makeToken(userId) {
-  return Buffer.from(`${userId}:${randomBytes(16).toString('hex')}`).toString('base64');
-}
-function verifyToken(req) {
+async function verifyJwt(req) {
   const auth = req.headers.authorization || '';
   if (!auth.startsWith('Bearer ')) return null;
   try {
-    const [userId] = Buffer.from(auth.slice(7), 'base64').toString().split(':');
-    const users = loadJSON(USERS_FILE, []);
-    return users.find(u => String(u.id) === String(userId)) || null;
+    const payload = jwt.verify(auth.slice(7), JWT_SECRET);
+    const { rows } = await db.query('SELECT * FROM users WHERE id=$1', [payload.sub]);
+    return rows[0] || null;
   } catch { return null; }
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
-app.post('/api/auth/signup', (req, res) => {
-  const { email, password, name, age, height_cm, weight_kg, gender, experience } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
-  const users = loadJSON(USERS_FILE, []);
-  if (users.find(u => u.email === email)) return res.status(409).json({ error: 'Email already registered' });
-  const user = { id: Date.now(), email, name: name || '', age: age || null, height_cm: height_cm || null,
-                 weight_kg: weight_kg || null, gender: gender || null, experience: experience || null,
-                 passwordHash: hashPassword(password), createdAt: new Date().toISOString() };
-  users.push(user);
-  saveJSON(USERS_FILE, users);
-  const { passwordHash: _, ...safeUser } = user;
-  res.json({ token: makeToken(user.id), user: safeUser });
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { email, password, name, age, height_cm, weight_kg, gender, experience } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+    const hash = await bcrypt.hash(password, SALT_ROUNDS);
+    const { rows } = await db.query(
+      `INSERT INTO users (email, name, age, height_cm, weight_kg, gender, experience, password_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,email,name,age,height_cm,weight_kg,gender,experience,created_at`,
+      [email, name||null, age||null, height_cm||null, weight_kg||null, gender||null, experience||null, hash]
+    );
+    res.json({ token: makeJwt(rows[0].id), user: rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(409).json({ error: 'Email already registered' });
+    console.error(e); res.status(500).json({ error: 'Server error' });
+  }
 });
 
-app.post('/api/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  const users = loadJSON(USERS_FILE, []);
-  const user = users.find(u => u.email === email && u.passwordHash === hashPassword(password));
-  if (!user) return res.status(401).json({ error: 'Invalid email or password' });
-  const { passwordHash: _, ...safeUser } = user;
-  res.json({ token: makeToken(user.id), user: safeUser });
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const { rows } = await db.query('SELECT * FROM users WHERE email=$1', [email]);
+    const user = rows[0];
+    if (!user || !(await bcrypt.compare(password, user.password_hash)))
+      return res.status(401).json({ error: 'Invalid email or password' });
+    const { password_hash: _, ...safeUser } = user;
+    res.json({ token: makeJwt(user.id), user: safeUser });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Server error' }); }
 });
 
-app.get('/api/auth/me', (req, res) => {
-  const user = verifyToken(req);
+app.get('/api/auth/me', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { passwordHash: _, ...safeUser } = user;
+  const { password_hash: _, ...safeUser } = user;
   res.json({ user: safeUser });
 });
 
-// ── Sessions ─────────────────────────────────────────────────────────────────
-app.post('/api/sessions/start', (req, res) => {
-  const user = verifyToken(req);
+// ── Sessions (API) ─────────────────────────────────────────────────────────────
+app.post('/api/sessions/start', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const sessions = loadJSON(SESSIONS_FILE, []);
-  const session = { id: Date.now(), userId: user.id, startedAt: new Date().toISOString(), endedAt: null };
-  sessions.push(session);
-  saveJSON(SESSIONS_FILE, sessions);
-  res.json(session);
+  const { rows } = await db.query(
+    'INSERT INTO sessions (user_id) VALUES ($1) RETURNING *', [user.id]
+  );
+  res.json(rows[0]);
 });
 
-app.post('/api/sessions/:id/end', (req, res) => {
-  const user = verifyToken(req);
+app.post('/api/sessions/:id/end', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const sessions = loadJSON(SESSIONS_FILE, []);
-  const session = sessions.find(s => String(s.id) === String(req.params.id) && s.userId === user.id);
-  if (!session) return res.status(404).json({ error: 'Session not found' });
-  session.endedAt = new Date().toISOString();
-  saveJSON(SESSIONS_FILE, sessions);
-  res.json(session);
+  const { rows } = await db.query(
+    'UPDATE sessions SET ended_at=NOW() WHERE id=$1 AND user_id=$2 RETURNING *',
+    [req.params.id, user.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'Session not found' });
+  res.json(rows[0]);
+});
+
+// ── Session Recorder Routes (called by YogaTwin sessionRecorderApi.js) ────────
+// These match the paths in frontend/src/utils/sessionRecorderApi.js exactly.
+app.post('/session/start', async (req, res) => {
+  try {
+    const { tZero, participantId, participantName, sessionNumber, videoFps } = req.body;
+    const { rows } = await db.query(
+      `INSERT INTO sessions (participant_id, participant_name, session_number, video_fps, t_zero)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [participantId||null, participantName||null, sessionNumber||null, videoFps||30, tZero||null]
+    );
+    res.json({ sessionId: rows[0].id, ...rows[0] });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/session/stop', async (req, res) => {
+  try {
+    const { sessionId, ...meta } = req.body;
+    if (sessionId) {
+      await db.query('UPDATE sessions SET ended_at=NOW() WHERE id=$1', [sessionId]);
+    }
+    res.json({ ok: true, meta });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/session/pose/start', async (req, res) => {
+  try {
+    const { poseId, poseName, sessionId } = req.body;
+    const { rows } = await db.query(
+      'INSERT INTO pose_recordings (session_id, pose_id, pose_name) VALUES ($1,$2,$3) RETURNING *',
+      [sessionId||null, poseId||null, poseName||null]
+    );
+    res.json({ recordingId: rows[0].id, ...rows[0] });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/session/pose/complete', async (req, res) => {
+  try {
+    const { recordingId, ...meta } = req.body;
+    if (recordingId) {
+      await db.query(
+        'UPDATE pose_recordings SET ended_at=NOW(), metadata=$1 WHERE id=$2',
+        [JSON.stringify(meta), recordingId]
+      );
+    }
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
 });
 
 // ── Practices ─────────────────────────────────────────────────────────────────
-app.post('/api/practices', (req, res) => {
-  const user = verifyToken(req);
+app.post('/api/practices', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const practices = loadJSON(PRACTICES_FILE, []);
-  const practice = { id: Date.now(), userId: user.id, ...req.body, createdAt: new Date().toISOString() };
-  practices.push(practice);
-  saveJSON(PRACTICES_FILE, practices);
-  res.json(practice);
+  const { session_id, pose_name, duration_seconds, completed } = req.body;
+  const { rows } = await db.query(
+    `INSERT INTO practices (user_id, session_id, pose_name, duration_seconds, completed)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [user.id, session_id||null, pose_name||null, duration_seconds||0, completed||false]
+  );
+  res.json(rows[0]);
 });
 
-app.get('/api/practices/session/:sessionId', (req, res) => {
-  const user = verifyToken(req);
+app.get('/api/practices/session/:sessionId', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const practices = loadJSON(PRACTICES_FILE, []).filter(
-    p => p.userId === user.id && String(p.session_id) === String(req.params.sessionId)
+  const { rows } = await db.query(
+    'SELECT * FROM practices WHERE user_id=$1 AND session_id=$2',
+    [user.id, req.params.sessionId]
   );
-  const by_pose = Object.values(
-    practices.reduce((acc, p) => {
-      if (!acc[p.pose_name]) acc[p.pose_name] = { pose_name: p.pose_name, total_count: 0 };
-      acc[p.pose_name].total_count++;
-      return acc;
-    }, {})
-  );
-  res.json({ practices, by_pose });
+  const by_pose = Object.values(rows.reduce((acc, p) => {
+    if (!acc[p.pose_name]) acc[p.pose_name] = { pose_name: p.pose_name, total_count: 0 };
+    acc[p.pose_name].total_count++;
+    return acc;
+  }, {}));
+  res.json({ practices: rows, by_pose });
 });
 
-app.get('/api/practices/user/history', (req, res) => {
-  const user = verifyToken(req);
+app.get('/api/practices/user/history', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const sessions = loadJSON(SESSIONS_FILE, []).filter(s => s.userId === user.id);
-  const practices = loadJSON(PRACTICES_FILE, []).filter(p => p.userId === user.id);
+  const { rows: sessions } = await db.query(
+    'SELECT * FROM sessions WHERE user_id=$1 ORDER BY started_at DESC', [user.id]
+  );
+  const { rows: practices } = await db.query(
+    'SELECT * FROM practices WHERE user_id=$1', [user.id]
+  );
   const sessionsWithPractices = sessions.map(s => ({
-    ...s,
-    practices: practices.filter(p => String(p.session_id) === String(s.id)),
+    ...s, practices: practices.filter(p => p.session_id === s.id)
   }));
   res.json({ sessions: sessionsWithPractices });
 });
 
-app.get('/api/practices/user/stats', (req, res) => {
-  const user = verifyToken(req);
+app.get('/api/practices/user/stats', async (req, res) => {
+  const user = await verifyJwt(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const practices = loadJSON(PRACTICES_FILE, []).filter(p => p.userId === user.id);
-  const byPose = Object.values(
-    practices.reduce((acc, p) => {
-      if (!acc[p.pose_name]) acc[p.pose_name] = { pose_name: p.pose_name, count: 0, total_seconds: 0 };
-      acc[p.pose_name].count++;
-      acc[p.pose_name].total_seconds += Number(p.duration_seconds || 0);
-      return acc;
-    }, {})
+  const { rows } = await db.query(
+    `SELECT pose_name, COUNT(*) AS count, SUM(duration_seconds) AS total_seconds
+     FROM practices WHERE user_id=$1 GROUP BY pose_name`, [user.id]
   );
-  res.json({ rows: byPose });
+  res.json({ rows });
 });
 
-// ── Health / utility stubs (used by frontend status checks) ──────────────────
+// ── Health / utility stubs ────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ status: 'ok', server: 'yogaalign', port: PORT }));
 app.get('/storage/volumes', (_req, res) => res.json({ volumes: [] }));
 app.get('/sync/gdrive/status', (_req, res) => res.json({ synced: false, message: 'GDrive sync not configured' }));
