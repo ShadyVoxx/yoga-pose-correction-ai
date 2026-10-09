@@ -1392,6 +1392,187 @@ app.get('/api/practices/user/stats', async (req, res) => {
 app.get('/health', (_req, res) => res.json({ status: 'ok', server: 'yogaalign', port: PORT }));
 app.get('/storage/volumes', (_req, res) => res.json({ volumes: [] }));
 app.get('/sync/gdrive/status', (_req, res) => res.json({ synced: false, message: 'GDrive sync not configured' }));
+// ─────────────────────────────────────────────────────────────────────────────
+// Data Collection — local file store + Google Drive upload
+// Mirrors the folder layout the Python data_collection_server.py used:
+//   YogaDataset/{participantId}_{sessionNumber}/{poseId}/
+//     landmarks.json   — array of { frameId, timestamp, landmarks[] }
+//     metadata.json    — session/pose info
+//     video.webm       — optional browser MediaRecorder output
+// ─────────────────────────────────────────────────────────────────────────────
+import { spawn } from 'child_process';
+
+const YOGA_DATASET_DIR = join(__dirname, 'YogaDataset');
+if (!fs.existsSync(YOGA_DATASET_DIR)) fs.mkdirSync(YOGA_DATASET_DIR, { recursive: true });
+
+// In-memory state for the active collection session (one at a time)
+let dcSession = null;  // { id, participantId, participantName, sessionNumber, dir }
+let dcPose    = null;  // { poseId, poseName, dir, frames: [] }
+
+function dcSessionDir(participantId, sessionNumber) {
+  const slug = `${participantId || 'unknown'}_session${sessionNumber || 1}`;
+  return join(YOGA_DATASET_DIR, slug);
+}
+
+// Override /session/start to also create local folder
+app.post('/session/start', async (req, res) => {
+  try {
+    const { tZero, participantId, participantName, sessionNumber, videoFps } = req.body;
+    // DB insert
+    let sessionId = null;
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO sessions (participant_id, participant_name, session_number, video_fps, t_zero)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        [participantId||null, participantName||null, sessionNumber||null, videoFps||30, tZero||null]
+      );
+      sessionId = rows[0].id;
+    } catch { /* DB may not be running — file-only mode */ }
+
+    // Local folder
+    const dir = dcSessionDir(participantId, sessionNumber);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(join(dir, 'metadata.json'), JSON.stringify(
+      { sessionId, participantId, participantName, sessionNumber, videoFps, tZero, startedAt: new Date().toISOString() },
+      null, 2
+    ));
+    dcSession = { id: sessionId, participantId, participantName, sessionNumber, dir };
+    dcPose = null;
+    res.json({ sessionId, directory: dir });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/session/stop', async (req, res) => {
+  try {
+    const { sessionId, ...meta } = req.body;
+    if (sessionId) {
+      try { await db.query('UPDATE sessions SET ended_at=NOW() WHERE id=$1', [sessionId]); } catch {}
+    }
+    if (dcSession?.dir) {
+      // Flush any open pose
+      if (dcPose?.frames?.length) flushPose();
+      // Write final metadata
+      const metaPath = join(dcSession.dir, 'metadata.json');
+      const existing = JSON.parse(fs.readFileSync(metaPath, 'utf8').catch?.() || '{}');
+      fs.writeFileSync(metaPath, JSON.stringify({ ...existing, ...meta, endedAt: new Date().toISOString() }, null, 2));
+    }
+    dcSession = null;
+    dcPose = null;
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/session/pose/start', async (req, res) => {
+  try {
+    const { poseId, poseName, sessionId } = req.body;
+    // Flush previous pose if open
+    if (dcPose?.frames?.length) flushPose();
+
+    let recordingId = null;
+    try {
+      const { rows } = await db.query(
+        'INSERT INTO pose_recordings (session_id, pose_id, pose_name) VALUES ($1,$2,$3) RETURNING id',
+        [sessionId||dcSession?.id||null, poseId||null, poseName||null]
+      );
+      recordingId = rows[0].id;
+    } catch {}
+
+    const poseDir = dcSession
+      ? join(dcSession.dir, poseId || poseName || 'pose')
+      : join(YOGA_DATASET_DIR, 'unsorted', poseId || 'pose');
+    fs.mkdirSync(poseDir, { recursive: true });
+    dcPose = { poseId, poseName, recordingId, dir: poseDir, frames: [] };
+    res.json({ recordingId, directory: poseDir });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+app.post('/session/pose/complete', async (req, res) => {
+  try {
+    const { recordingId, ...meta } = req.body;
+    if (recordingId) {
+      try {
+        await db.query(
+          'UPDATE pose_recordings SET ended_at=NOW(), metadata=$1 WHERE id=$2',
+          [JSON.stringify(meta), recordingId]
+        );
+      } catch {}
+    }
+    const savedTo = flushPose(meta);
+    res.json({ ok: true, savedTo });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+/** Write buffered landmark frames + metadata to disk, clear dcPose buffer. */
+function flushPose(extraMeta = {}) {
+  if (!dcPose) return null;
+  const { dir, poseId, poseName, frames } = dcPose;
+  fs.writeFileSync(join(dir, 'landmarks.json'), JSON.stringify(frames, null, 2));
+  fs.writeFileSync(join(dir, 'metadata.json'), JSON.stringify(
+    { poseId, poseName, frameCount: frames.length, ...extraMeta, savedAt: new Date().toISOString() },
+    null, 2
+  ));
+  console.log(`💾 Saved ${frames.length} landmark frames → ${dir}`);
+  dcPose.frames = []; // clear buffer
+  return dir;
+}
+
+// Receive WebM video blob for the active pose
+app.post('/session/video/webm', express.raw({ type: 'video/webm', limit: '500mb' }), (req, res) => {
+  try {
+    if (!dcPose?.dir) return res.status(400).json({ error: 'No active pose recording' });
+    const dest = join(dcPose.dir, 'video.webm');
+    fs.writeFileSync(dest, req.body);
+    console.log(`🎥 Video saved → ${dest} (${(req.body.length / 1024 / 1024).toFixed(1)} MB)`);
+    res.json({ ok: true, video_path: dest, video_size: req.body.length });
+  } catch (e) { console.error(e); res.status(500).json({ error: e.message }); }
+});
+
+// Upload a session folder to Google Drive via the Python helper script
+app.post('/session/upload/gdrive', (req, res) => {
+  const targetDir = req.body?.directory || (dcSession?.dir ?? YOGA_DATASET_DIR);
+  const credsFile = join(__dirname, 'gdrive_credentials.json');
+  if (!fs.existsSync(credsFile)) {
+    return res.status(503).json({ error: 'gdrive_credentials.json not found — run setup first' });
+  }
+  const py = spawn('python3', [join(__dirname, 'upload_session_gdrive.py'), '--dir', targetDir], {
+    cwd: __dirname,
+  });
+  let out = '', err = '';
+  py.stdout.on('data', d => { out += d; });
+  py.stderr.on('data', d => { err += d; });
+  py.on('close', code => {
+    if (code === 0) {
+      res.json({ ok: true, output: out.trim() });
+    } else {
+      console.error('GDrive upload error:', err);
+      res.status(500).json({ error: err.trim() || 'Upload failed' });
+    }
+  });
+});
+
+// Better GDrive status — check if token exists
+app.get('/sync/gdrive/status', (_req, res) => {
+  const tokenExists = fs.existsSync(join(__dirname, 'gdrive_token.json'));
+  const credsExist  = fs.existsSync(join(__dirname, 'gdrive_credentials.json'));
+  res.json({
+    synced: false,
+    ready: tokenExists && credsExist,
+    credentialsFound: credsExist,
+    tokenFound: tokenExists,
+    message: tokenExists ? 'Google Drive authorized' : 'Run: python3 upload_session_gdrive.py --auth',
+  });
+});
+
+// Storage volumes — report local YogaDataset folder
+app.get('/storage/volumes', (_req, res) => {
+  const sessions = fs.existsSync(YOGA_DATASET_DIR)
+    ? fs.readdirSync(YOGA_DATASET_DIR).filter(f =>
+        fs.statSync(join(YOGA_DATASET_DIR, f)).isDirectory()
+      )
+    : [];
+  res.json({ volumes: [{ label: 'YogaDataset (local)', path: YOGA_DATASET_DIR, sessions: sessions.length }] });
+});
+
 app.get('/session/download/zip', (_req, res) => res.status(501).json({ error: 'Download not available in this deployment' }));
 app.get('/debug/imu', (_req, res) => res.json({ imu: [], message: 'IMU stream not connected' }));
 
@@ -1415,6 +1596,34 @@ function wsBroadcast(payload) {
 }
 
 wss.on('connection', (ws, req) => {
+  // ── /ws/landmarks — Data collection landmark stream (YogaTwin frontend) ──
+  if (req.url === '/ws/landmarks') {
+    console.log('🔌 Landmark WebSocket connected (data collection)');
+    ws.send(JSON.stringify({ type: 'connected', message: 'Landmark recorder ready' }));
+
+    ws.on('message', (raw) => {
+      try {
+        const frame = JSON.parse(raw.toString());
+        // Buffer frame into the active pose recording
+        if (dcPose) {
+          dcPose.frames.push(frame);
+        }
+        // Acknowledge every 30 frames so the frontend knows it's live
+        if (dcPose && dcPose.frames.length % 30 === 0) {
+          ws.send(JSON.stringify({ type: 'ack', frameCount: dcPose.frames.length }));
+        }
+      } catch { /* ignore malformed frames */ }
+    });
+
+    ws.on('close', () => {
+      console.log('🔌 Landmark WebSocket disconnected');
+      // Auto-flush if pose still open
+      if (dcPose?.frames?.length) flushPose();
+    });
+    return; // don't fall through to UE handler
+  }
+
+  // ── Default — Unreal Engine Digital Twin stream ──────────────────────────
   console.log(`🔌 WebSocket client connected (${req.socket.remoteAddress})`);
 
   ws.on('message', (raw) => {
